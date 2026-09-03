@@ -152,7 +152,10 @@ of that month), `committed(user)` is `0`.
 
 ### Envelope
 - `id`
-- `budget_id`
+- `budget_id` (immutable once set — `BudgetAssignment.envelope_id`'s
+  same-budget constraint is enforced via a composite reference to
+  `(Envelope.id, Envelope.budget_id)`, which only holds if this can't
+  change out from under existing assignments)
 - `name`
 
 A named spending category nested within a budget (e.g. the "Household"
@@ -182,7 +185,7 @@ rule as `Commitment`: the applicable row for month `m` is the latest
 - `envelope_id` (nullable, mutable; if set, must belong to the same
   `budget_id` — enforced structurally via a composite reference to
   `(Envelope.id, Envelope.budget_id)` rather than by prose alone)
-- `amount` (mutable, subject to the invariant below)
+- `amount` (mutable, subject to the invariant below; must be nonzero)
 - `created_at` (immutable once set — used by Visibility rule 1 to
   determine budget membership as of the moment this assignment was
   created; if it could be edited after the fact, that visibility
@@ -198,18 +201,26 @@ each row is independently taggable with at most one envelope. Finer
 splitting across envelopes reuses this same mechanism — e.g. a $30 Sobeys
 transaction becomes a $20 row (Household / Groceries) and a $10 row
 (Household / Household Supplies) rather than requiring a separate
-envelope-splitting feature. Assignment amounts must share the transaction's
-sign, and the sum of their absolute values must not exceed the absolute
-value of the transaction's amount — e.g. a −$50 refund can have assignments
-summing to anywhere from $0 to −$50, but never past −$50. This invariant is
-checked symmetrically on either edit path: editing a `Transaction.amount`
-below the current assignment sum (or flipping its sign) is rejected, and so
-is editing a `BudgetAssignment.amount` (or adding a new one) in a way that
-would push the sum past the transaction's own amount — whichever side
-changes, the other side's existing values are what's checked against. All
-month-scoped aggregates in this document (`actual(user, m)`,
-`total_spend(m)`, and envelope `spend(m)`) key off the assignment's
-`Transaction.date`, not `BudgetAssignment.created_at`.
+envelope-splitting feature. Assignment amounts must be nonzero and share
+the transaction's sign, and the sum of their absolute values must not
+exceed the absolute value of the transaction's amount — e.g. a −$50 refund
+can have assignments summing to anywhere from $0 (i.e. no assignment rows
+at all) to −$50, but never past −$50 — and no single row's `amount` may
+itself be `0`. This invariant is checked symmetrically on either edit path:
+editing a `Transaction.amount` below the current assignment sum (or
+flipping its sign) is rejected, and so is editing a `BudgetAssignment.amount`
+(or adding a new one) in a way that would push the sum past the
+transaction's own amount, or to exactly `0` — whichever side changes, the
+other side's existing values are what's checked against. Requiring a
+nonzero amount matters beyond bookkeeping: Visibility rule 1 grants access
+based on a `BudgetAssignment` merely *existing*, so a `0`-amount row would
+otherwise be a permanent, functionally-empty grant of full transaction
+visibility with nothing actually assigned — banning it means "unsharing" a
+transaction from a budget always means deleting the row, which is also the
+only thing that can end the visibility that row granted (see Visibility
+rule 4a below). All month-scoped aggregates in this document
+(`actual(user, m)`, `total_spend(m)`, and envelope `spend(m)`) key off the
+assignment's `Transaction.date`, not `BudgetAssignment.created_at`.
 
 Moving an assignment to a *different* `budget_id` is not supported as an
 in-place edit — `budget_id` is immutable for the same reason `created_at`
@@ -274,6 +285,15 @@ members, fully resolving a month's imbalances may require multiple
    with them; only new assignments are affected. This principle is
    specific to `BudgetMembership`; it does not extend to `AccountOwnership`
    (see that entity's note above).
+4a. This non-retroactive principle is about the *recipient's* membership
+    changing — it says nothing about the *sharer* changing their mind.
+    Deleting a `BudgetAssignment` (the only way to undo one, since a
+    `0`-amount row is disallowed — see that entity's note) removes it from
+    rule 1's existence check going forward: if it was the transaction's
+    only qualifying assignment to that budget, visibility for that budget's
+    members lapses. This is a deliberate, sender-initiated unsharing path,
+    distinct from — and not in tension with — rule 4's recipient-side
+    guarantee.
 
 ## Settlement & balance calculation
 
@@ -418,11 +438,25 @@ running balance going into March is $80 − $60 = **+$20**.
   within a household would silently produce meaningless totals rather than
   an error. Acceptable for v1; real multi-currency support is out of scope.
 - Who may edit/delete a `BudgetAssignment` after creation (only its
-  `created_by`, or any budget member?), and who may create a `Commitment`
-  or `EnvelopeAllocation` (any budget member, or is it restricted?), are
-  not yet decided — flagged for the implementation plan. (The `created_by`
-  field needed to support a "creator-only" policy is present on all three
-  entities; only the policy itself is undecided.)
+  `created_by`, or any budget member?), who may create a `Commitment` or
+  `EnvelopeAllocation` (any budget member, or is it restricted?), and what
+  special rights (if any) a `Budget`'s `created_by` has over other members
+  — e.g. sole authority to delete the budget or change its settlement
+  rules — are not yet decided — flagged for the implementation plan. (The
+  `created_by` field needed to support a "creator-only" policy is present
+  on `BudgetAssignment`, `Commitment`, `EnvelopeAllocation`, and `Budget`
+  itself; only the policy is undecided.)
+- Who may add or remove `BudgetMembership` rows at all (invite/remove
+  members from a budget) is not addressed anywhere in this document — a
+  more basic gap than the edit-policy questions above, since without it
+  there's no stated way a budget gains its second member in the first
+  place.
+- `AccountOwnership.user_id` and `BudgetMembership.user_id` are not
+  structurally required to hold a `HouseholdMembership` (current or past)
+  in the household that owns the `Account`/`Budget` — nothing prevents a
+  user outside the household from owning an account or belonging to a
+  budget inside it. Same class of gap as the currency assumption above:
+  a convention the data model doesn't enforce, acceptable for v1.
 - Whether a `Budget` can be deleted/archived, and what happens to its
   historical `Commitment`/`Settlement` records when it is, is not yet
   decided.
