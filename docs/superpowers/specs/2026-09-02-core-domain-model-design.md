@@ -158,7 +158,16 @@ rather than editing an existing one. The commitment that applies to a given
 month is the row with the latest `effective_from <= that month`; if two rows
 tie on `effective_from`, the one with the latest `created_at` wins. If no
 row's `effective_from` is `<= that month` (nothing has been committed yet as
-of that month), `committed(user)` is `0`.
+of that month), `committed(user, m)` is `0`.
+
+`amount` is always a fixed dollar figure. Percentage-of-spend commitments
+(e.g. "I cover 40% of whatever we spend") were considered during design
+and deliberately dropped: unlike a fixed amount, a percentage needs a base
+to apply to, and "40% of `total_spend(m)`" would make a member's
+commitment depend on the very spend it's meant to be compared against —
+changing what `balance` even measures (proportional-share fairness, not
+promise-vs-actual). Fixed amounts are sufficient for how this household
+plans to use commitments; this may be revisited if that changes.
 
 ### Envelope
 - `id`
