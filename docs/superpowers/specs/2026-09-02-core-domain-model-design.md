@@ -27,12 +27,13 @@ In scope:
   them) to budgets
 - Per-budget monthly commitments, actual-spend tracking, and settlement
   (who owes whom, and how imbalances get resolved)
+- Envelopes (YNAB-style category budgeting) nested within a budget, with
+  rollover balances and versioned allocation history
 
 Out of scope (future design docs):
 - Technology/framework/storage choices
 - UI/UX
 - Bank/card sync or manual transaction import
-- Categories/tags for personal reporting (separate from budgets)
 - Notifications, multi-currency, multi-household membership for a user
 
 ## Core entities
@@ -110,17 +111,45 @@ month is the row with the latest `effective_from <= that month`. This
 preserves full history (e.g. "$1000/month from Feb 2027, $1200/month from
 Jan 2028") without needing full event sourcing.
 
+### Envelope
+- `id`
+- `budget_id`
+- `name`
+
+A named spending category nested within a budget (e.g. the "Household"
+budget contains envelopes "Groceries", "Insurance", "Internet & Mobile").
+Envelopes do not exist independently of a budget.
+
+### EnvelopeAllocation
+- `id`
+- `envelope_id`
+- `amount`
+- `effective_from` (month)
+- `created_at`
+- `created_by`
+
+The monthly amount allocated to an envelope — one shared amount for the
+whole budget, not per-member. **Immutable and versioned**, exactly like
+`Commitment`: changing the allocation inserts a new row rather than editing
+one, so the full history of changes is preserved.
+
 ### BudgetAssignment
 - `id`
 - `transaction_id`
 - `budget_id`
+- `envelope_id` (nullable; if set, must belong to the same `budget_id`)
 - `amount`
 
-Links a transaction (or a portion of it) to a budget. A single transaction
-can have multiple `BudgetAssignment` rows across different budgets (e.g. a
-grocery run split between "Household" and a personal "Treats" budget). The
-sum of a transaction's assignment amounts must not exceed the transaction's
-total amount (same sign).
+Links a transaction (or a portion of it) to a budget, optionally tagging
+that portion with one envelope within the budget. A single transaction can
+have multiple `BudgetAssignment` rows across different budgets (e.g. a
+grocery run split between "Household" and a personal "Treats" budget), and
+each row is independently taggable with at most one envelope. Finer
+splitting across envelopes reuses this same mechanism — e.g. a $30 Sobeys
+transaction becomes a $20 row (Household / Groceries) and a $10 row
+(Household / Household Supplies) rather than requiring a separate
+envelope-splitting feature. The sum of a transaction's assignment amounts
+must not exceed the transaction's total amount (same sign).
 
 ### Settlement
 - `id`
@@ -202,6 +231,35 @@ commitment. Settling can be a `transfer` (partner pays you) and/or an
 per your actual conversation about it — the model doesn't prescribe how the
 $250 gets divided, only that a `Settlement` row records what you decided.
 
+## Envelope tracking (rollover budgeting)
+
+Envelopes track spend against a category allocation the way YNAB does:
+unspent money rolls forward as available balance, and overspending leaves
+the envelope negative until future allocations (or a manual fix) cover it.
+This is independent of, and not reconciled against, the budget's own
+per-member `Commitment` totals — an envelope's allocations are a separate
+set of numbers the budget members choose to set (see open questions).
+
+For a given `Envelope` as of month `M`:
+
+- `allocation(m)` = the envelope's applicable `EnvelopeAllocation.amount` for
+  month `m` (latest row with `effective_from <= m`, same versioning rule as
+  `Commitment`).
+- `spend(m)` = sum of `BudgetAssignment.amount` tagged with this envelope,
+  for transactions dated in month `m`.
+- `running_balance(M)` = sum, over every month `m <= M` since the envelope's
+  first allocation, of `allocation(m) − spend(m)`.
+
+A positive running balance is money still available in the envelope; a
+negative one is overspending being carried forward.
+
+### Example
+
+"Groceries" envelope, allocated $500/month starting Jan 2027. January spend
+is $420 (balance: +$80, carried forward). February allocation stays $500;
+February spend is $560 → `allocation(Feb) − spend(Feb)` = −$60, so the
+running balance going into March is $80 − $60 = **+$20**.
+
 ## Open questions / explicit assumptions
 
 - Single currency per household is assumed for v1; multi-currency handling
@@ -215,3 +273,10 @@ $250 gets divided, only that a `Settlement` row records what you decided.
 - Settlement UX (how a $250 combined-overspend gets divided into individual
   `accept`/`transfer` actions) is a product/UI decision, not a data-model
   one; this doc only defines the record types involved.
+- There is no enforced relationship between a budget's total `Commitment`
+  amounts and the sum of its envelope allocations (true YNAB "give every
+  dollar a job" reconciliation is not required for v1). This may be worth
+  revisiting once envelopes are actually used day to day.
+- Whether an `Envelope` can be deleted/archived, and what happens to its
+  historical `EnvelopeAllocation` rows and running balance when it is, is
+  not yet decided.
