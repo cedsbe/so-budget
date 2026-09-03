@@ -68,7 +68,13 @@ A household supports any number of members (starting usage will typically be
 
 Many-to-many: an account with exactly one owner is a personal account; an
 account with two or more owners is a joint account. There is no structural
-difference between the two beyond the number of owners.
+difference between the two beyond the number of owners. Unlike
+`BudgetMembership` (below), this is **not** versioned — it reflects only
+current ownership. Ownership changes (e.g. converting a personal account to
+joint) are expected to be rare/administrative, and visibility (see
+Visibility rule 1) follows current ownership: it is not treated as a
+consent-driven sharing action the way budget membership is, so it is not
+covered by the "not retroactively revoked" principle.
 
 ### Transaction
 - `id`
@@ -95,6 +101,14 @@ budgets with 2+ members with commitments defined.
 ### BudgetMembership
 - `budget_id`
 - `user_id`
+- `joined_at`
+- `left_at` (nullable)
+
+Unlike `AccountOwnership`, this **is** versioned: leaving a budget sets
+`left_at` rather than deleting the row, so past membership windows stay
+queryable. This is what makes Visibility rule 4 well-defined (see below):
+visibility granted by a `BudgetAssignment` depends on membership *at the
+time the assignment was created*, not on live membership.
 
 ### Commitment
 - `id`
@@ -116,7 +130,6 @@ of that month), `committed(user)` is `0`.
 - `id`
 - `budget_id`
 - `name`
-- `created_at`
 
 A named spending category nested within a budget (e.g. the "Household"
 budget contains envelopes "Groceries", "Insurance", "Internet & Mobile").
@@ -142,8 +155,12 @@ rule as `Commitment`: the applicable row for month `m` is the latest
 - `id`
 - `transaction_id`
 - `budget_id`
-- `envelope_id` (nullable; if set, must belong to the same `budget_id`)
+- `envelope_id` (nullable; if set, must belong to the same `budget_id` —
+  enforced structurally via a composite reference to `(Envelope.id,
+  Envelope.budget_id)` rather than by prose alone)
 - `amount`
+- `created_at` (used by Visibility rule 1 to determine budget membership
+  as of the moment this assignment was created)
 
 Links a transaction (or a portion of it) to a budget, optionally tagging
 that portion with one envelope within the budget. A single transaction can
@@ -156,36 +173,49 @@ transaction becomes a $20 row (Household / Groceries) and a $10 row
 envelope-splitting feature. Assignment amounts must share the transaction's
 sign, and the sum of their absolute values must not exceed the absolute
 value of the transaction's amount — e.g. a −$50 refund can have assignments
-summing to anywhere from $0 to −$50, but never past −$50.
+summing to anywhere from $0 to −$50, but never past −$50. All month-scoped
+aggregates in this document (`actual(user)`, `total_spend(month)`, and
+envelope `spend(m)`) key off the assignment's `Transaction.date`, not
+`BudgetAssignment.created_at`.
 
 If a `Transaction` is deleted, its `BudgetAssignment` rows are deleted with
-it (cascade). Editing a transaction's `amount` to a value smaller in
-magnitude than the current sum of its assignments is rejected — the
-assignments must be reduced first, to preserve the invariant above.
+it (cascade). Editing a transaction in a way that would violate the
+invariant above for any of its existing assignments — shrinking `amount`
+below the current assignment sum, or flipping its sign while assignments
+exist — is rejected; the assignments must be adjusted first.
 
 ### Settlement
 - `id`
 - `budget_id`
 - `month`
 - `type` (`accept` | `transfer`)
-- `from_user_id`
-- `to_user_id` (for `transfer`; null for `accept`)
+- `from_user_id` (the debtor — the member whose negative `balance` this row
+  resolves)
+- `to_user_id` (the creditor — the member whose positive `balance` this row
+  resolves)
 - `amount`
 - `created_at`
 - `created_by`
 
-Records how an outstanding balance on a budget was resolved for a given
-month: `transfer` records money actually moving from `from_user_id` (payer)
-to `to_user_id` (payee); `accept` records `from_user_id` (the member who was
-owed reimbursement, i.e. the one with the positive balance) forgiving it —
-no money moves, and `to_user_id` is left null.
+Records how an outstanding balance between exactly two members of a budget
+was resolved for a given month, moving both `balance(from_user_id)` and
+`balance(to_user_id)` toward `0` by `amount`. Both `from_user_id` and
+`to_user_id` are always set, for both types — the only difference is
+whether money actually moved: `transfer` means `from_user_id` paid
+`to_user_id` that amount; `accept` means `to_user_id` (the creditor) agreed
+to forgive it, with no money moving. For a budget with more than two
+members, fully resolving a month's imbalances may require multiple
+`Settlement` rows, each still tying exactly one debtor to one creditor.
 
 ## Visibility rules
 
 1. A user can see a `Transaction` if, and only if:
-   - they own the transaction's `Account` (via `AccountOwnership`), **or**
-   - the transaction has at least one `BudgetAssignment` to a `Budget` the
-     user belongs to (via `BudgetMembership`).
+   - they currently own the transaction's `Account` (via `AccountOwnership`
+     — this check uses live ownership, since it is unversioned), **or**
+   - the transaction has at least one `BudgetAssignment` to a `Budget` of
+     which the user was a member (via `BudgetMembership`, i.e.
+     `joined_at <= assignment.created_at < left_at` or `left_at` still
+     null) **at the time that `BudgetAssignment` was created**.
 2. Visibility is all-or-nothing at the transaction level: once visible, the
    full transaction (merchant, full amount, date, account) is shown — not
    just the assigned slice. (Default behavior; a per-assignment "share only
@@ -194,9 +224,13 @@ no money moves, and `to_user_id` is left null.
    they own, and only targeting budgets they are themselves a member of.
    This prevents a user from granting visibility into someone else's
    transaction, or assigning into a budget they don't belong to.
-4. **Assumption:** visibility is not retroactively revoked. If a user is
-   later removed from a budget, transactions already assigned/visible to
-   them remain visible; only future transactions are affected.
+4. **Assumption:** budget-membership-driven visibility is not retroactively
+   revoked — rule 1's second clause checks membership as of the
+   assignment's creation time, not live membership, so a member who later
+   leaves a budget (`left_at` set) keeps seeing transactions already shared
+   with them; only new assignments are affected. This principle is
+   specific to `BudgetMembership`; it does not extend to `AccountOwnership`
+   (see that entity's note above).
 
 ## Settlement & balance calculation
 
@@ -223,14 +257,18 @@ For a given `Budget` and `month`:
   transaction came from. Unlike `actual(user)`, this is not restricted to
   solely-owned accounts — it's the household's full picture of what was
   spent against the budget.
-- `total_variance(month)` = `total_spend(month) − sum(committed)` across
-  the budget's members — the household's over/underspend for that month.
-  (This is deliberately not the same as `sum(actual(user))`, which excludes
-  joint-account spend; `total_variance` is the only figure that includes
-  it.)
-- Outstanding `Settlement` records for the budget/month reduce the balance:
-  `accept` zeroes it out (forgiven, no money moves); `transfer` records an
-  actual payment between members. The data model does not constrain
+- `total_variance(month)` = `total_spend(month) − sum(committed)`, where
+  the sum ranges over every user who has ever had a `BudgetMembership` row
+  for this budget (current or past — `committed(user)` is `0` for anyone
+  without an applicable `Commitment`, so including former members is always
+  safe, and keeps this symmetric with `total_spend`, which likewise counts
+  all assignments regardless of current membership). This is deliberately
+  not the same as `sum(actual(user))`, which excludes joint-account spend;
+  `total_variance` is the only figure that includes it.
+- Outstanding `Settlement` records for the budget/month reduce the balance
+  of both the named debtor (`from_user_id`) and creditor (`to_user_id`)
+  toward `0` by `amount`: `accept` does this with no money moving;
+  `transfer` records an actual payment. The data model does not constrain
   `Settlement.amount` to match the computed `balance(user)` — the app layer
   is expected to suggest the computed figure, but recording a different
   amount is structurally legal and simply changes the running balance
@@ -255,10 +293,12 @@ personal spend here; if it had, `total_variance` would include it while
 
 The app surfaces both: partner owes you a net amount reflecting the +450/−200
 split, and the household overspent by $250 relative to its combined
-commitment. Settling can be a `transfer` (partner pays you) and/or an
-`accept` (you agree to absorb some or all of the $250 overspend), recorded
-per your actual conversation about it — the model doesn't prescribe how the
-$250 gets divided, only that a `Settlement` row records what you decided.
+commitment. Settling could be a `transfer` (`from_user_id`: partner,
+`to_user_id`: you, `amount`: $200 — partner pays you, zeroing both
+balances) and/or an `accept` (same `from_user_id`/`to_user_id`, but you as
+the creditor forgive some or all of it instead) — the model doesn't
+prescribe how the $250 combined overspend gets divided, only that a
+`Settlement` row records what you decided.
 
 ## Envelope tracking (rollover budgeting)
 
@@ -276,11 +316,11 @@ For a given `Envelope` as of month `M`:
   `created_at`, same rule as `Commitment`); `0` if no row applies yet.
 - `spend(m)` = sum of `BudgetAssignment.amount` tagged with this envelope,
   for transactions dated in month `m`; `0` if none.
-- `running_balance(M)` = sum, over every month `m` from the envelope's
-  `created_at` month through `M`, of `allocation(m) − spend(m)`. Because
-  both terms default to `0` when absent, this is well-defined even for
-  months before the envelope's first `EnvelopeAllocation`, or if spend is
-  ever tagged to an envelope that has no allocation at all.
+- `running_balance(M)` = sum, over every month `m <= M`, of
+  `allocation(m) − spend(m)`. Both terms are `0` for any month before the
+  envelope has an `EnvelopeAllocation` or tagged `BudgetAssignment`, so in
+  practice the sum only has as many nonzero terms as the envelope has
+  actually been used for — no separate "start month" needs to be tracked.
 
 A positive running balance is money still available in the envelope; a
 negative one is overspending being carried forward.
