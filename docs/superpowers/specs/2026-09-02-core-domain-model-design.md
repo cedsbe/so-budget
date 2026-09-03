@@ -55,12 +55,22 @@ Out of scope (future design docs):
 - `joined_at`
 - `left_at` (nullable)
 
-A household supports any number of members (starting usage will typically be
-2, but the model does not assume exactly 2). This entity is given the same
-`left_at` shape as `BudgetMembership`, for structural consistency, but what
-removal actually *does* to the user's accounts/budgets/commitments is still
-an open question (see below) — this only ensures the schema doesn't
-foreclose answering it later.
+The entity supports any number of members, but **for v1 the product
+assumption is exactly 2 concurrent members per household** (this app's
+first household is one couple). This isn't structurally enforced —
+`HouseholdMembership` would technically allow more — it's a stated v1
+scope decision, not a modeling limit: the entity is kept general because
+generalizing later should mean relaxing an assumption, not restructuring
+the schema. One concrete consequence: since a `Budget`'s members are drawn
+from its household, no budget can have more than 2 members in v1 either,
+which makes the "3+ member budget" contingencies described later in this
+document (e.g. multiple `Settlement` rows per month) currently dormant —
+built for when it's needed, not because v1 exercises it.
+
+This entity is given the same `left_at` shape as `BudgetMembership`, for
+structural consistency, but what removal actually *does* to the user's
+accounts/budgets/commitments is still an open question (see below) — this
+only ensures the schema doesn't foreclose answering it later.
 
 ### Account
 - `id`
@@ -414,8 +424,15 @@ Envelopes track spend against a category allocation the way YNAB does:
 unspent money rolls forward as available balance, and overspending leaves
 the envelope negative until future allocations (or a manual fix) cover it.
 This is independent of, and not reconciled against, the budget's own
-per-member `Commitment` totals — an envelope's allocations are a separate
-set of numbers the budget members choose to set (see open questions).
+per-member `Commitment` totals — deliberately so, not an oversight: an
+envelope answers "did we spend what we planned in this category," a
+household-level question with no owner, since who actually makes a given
+Groceries or Insurance purchase varies transaction to transaction.
+`Commitment`/`Settlement` answer a different question — "who fronted the
+money, and are we square" — which is inherently per-member. Requiring the
+two to reconcile (YNAB's "give every dollar a job") would conflate them;
+keeping them decoupled lets "we're on track for Groceries this month" and
+"you owe me $80" be tracked, and read, independently.
 
 For a given `Envelope` as of month `M`:
 
@@ -439,6 +456,32 @@ negative one is overspending being carried forward.
 is $420 (balance: +$80, carried forward). February allocation stays $500;
 February spend is $560 → `allocation(Feb) − spend(Feb)` = −$60, so the
 running balance going into March is $80 − $60 = **+$20**.
+
+### Pattern: a "To Review" triage envelope
+
+No schema addition is needed to support an inbox-style workflow for
+transactions that need joint attention before being properly categorized —
+it falls directly out of the primitives already defined:
+
+- A joint-account transaction is already visible to both owners the moment
+  it exists (Visibility rule 1's ownership clause) — no `BudgetAssignment`
+  is needed for either of them to see it.
+- Either owner can provisionally assign it to the shared budget under an
+  ordinary, household-chosen envelope named e.g. "To Review" — this is
+  just a normal `Envelope` row, not a special system category.
+- Because `envelope_id` is mutable and `amount` can be edited or split
+  into additional rows (subject to the usual invariants), re-categorizing
+  out of "To Review" into Groceries, Insurance, etc. — or splitting it
+  across several — is already fully supported without further design.
+- This pattern is expected to matter mainly for joint-account
+  transactions. Personal-account transactions are self-assigned directly
+  by their owner, with no shared review step — visibility to the other
+  member only happens once (and because) they've chosen a real budget/
+  envelope for it, not an interim "needs review" state.
+
+What actually populates "To Review" for a new joint-account transaction
+(manual entry vs. future automatic bank-sync import) is outside this
+document's scope — see the bank-sync/import design mentioned under Scope.
 
 ## Open questions / explicit assumptions
 
@@ -475,10 +518,6 @@ running balance going into March is $80 − $60 = **+$20**.
 - Settlement UX (how a $250 combined-overspend gets divided into individual
   `accept`/`transfer` actions) is a product/UI decision, not a data-model
   one; this doc only defines the record types involved.
-- There is no enforced relationship between a budget's total `Commitment`
-  amounts and the sum of its envelope allocations (true YNAB "give every
-  dollar a job" reconciliation is not required for v1). This may be worth
-  revisiting once envelopes are actually used day to day.
 - Whether an `Envelope` can be deleted/archived, and what happens to its
   historical `EnvelopeAllocation` rows and running balance when it is, is
   not yet decided.
