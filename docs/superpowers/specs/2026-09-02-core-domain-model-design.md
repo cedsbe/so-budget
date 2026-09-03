@@ -108,12 +108,13 @@ Budgets are arbitrary and user-defined (e.g. "Household", "Vacation",
 member behaves like a personal budget; a budget with two or more members
 behaves like a shared one. Settlement math (see below) is only meaningful
 for budgets with 2+ members — it's computed per-member using
-`committed(user)`, which is `0` for any member who has never set a
-`Commitment`. That's an ordinary case, not an error: a member with no
-commitment simply has `balance(user) = actual(user)`, so their balance
-tracks their spend one-for-one until they set a commitment. The app is
-expected to prompt members to set one before relying on settlement figures,
-but the data model doesn't require it.
+`committed(user, m)`, which is `0` for any member who has never set a
+`Commitment` applicable to month `m`. That's an ordinary case, not an
+error: a member with no commitment simply has `monthly_delta(user, m) =
+actual(user, m)` for every such month, so their running `balance` tracks
+their spend one-for-one until they set a commitment. The app is expected
+to prompt members to set one before relying on settlement figures, but the
+data model doesn't require it.
 
 ### BudgetMembership
 - `budget_id`
@@ -176,15 +177,18 @@ rule as `Commitment`: the applicable row for month `m` is the latest
 
 ### BudgetAssignment
 - `id`
-- `transaction_id`
-- `budget_id`
-- `envelope_id` (nullable; if set, must belong to the same `budget_id` —
-  enforced structurally via a composite reference to `(Envelope.id,
-  Envelope.budget_id)` rather than by prose alone)
-- `amount`
-- `created_at` (used by Visibility rule 1 to determine budget membership
-  as of the moment this assignment was created)
-- `created_by`
+- `transaction_id` (immutable once set)
+- `budget_id` (immutable once set — see below)
+- `envelope_id` (nullable, mutable; if set, must belong to the same
+  `budget_id` — enforced structurally via a composite reference to
+  `(Envelope.id, Envelope.budget_id)` rather than by prose alone)
+- `amount` (mutable, subject to the invariant below)
+- `created_at` (immutable once set — used by Visibility rule 1 to
+  determine budget membership as of the moment this assignment was
+  created; if it could be edited after the fact, that visibility
+  determination could be rewritten retroactively, which would undermine
+  rule 4)
+- `created_by` (immutable once set)
 
 Links a transaction (or a portion of it) to a budget, optionally tagging
 that portion with one envelope within the budget. A single transaction can
@@ -197,16 +201,30 @@ transaction becomes a $20 row (Household / Groceries) and a $10 row
 envelope-splitting feature. Assignment amounts must share the transaction's
 sign, and the sum of their absolute values must not exceed the absolute
 value of the transaction's amount — e.g. a −$50 refund can have assignments
-summing to anywhere from $0 to −$50, but never past −$50. All month-scoped
-aggregates in this document (`actual(user)`, `total_spend(month)`, and
-envelope `spend(m)`) key off the assignment's `Transaction.date`, not
-`BudgetAssignment.created_at`.
+summing to anywhere from $0 to −$50, but never past −$50. This invariant is
+checked symmetrically on either edit path: editing a `Transaction.amount`
+below the current assignment sum (or flipping its sign) is rejected, and so
+is editing a `BudgetAssignment.amount` (or adding a new one) in a way that
+would push the sum past the transaction's own amount — whichever side
+changes, the other side's existing values are what's checked against. All
+month-scoped aggregates in this document (`actual(user, m)`,
+`total_spend(m)`, and envelope `spend(m)`) key off the assignment's
+`Transaction.date`, not `BudgetAssignment.created_at`.
+
+Moving an assignment to a *different* `budget_id` is not supported as an
+in-place edit — `budget_id` is immutable for the same reason `created_at`
+is: changing it would retroactively alter who could see the transaction
+under Visibility rule 1. To reassign a transaction's portion to a different
+budget, delete the row and create a new one (a fresh `BudgetAssignment`
+with its own `created_at`, evaluated against membership at that new time).
+`envelope_id`, by contrast, is a plain re-taggable field with no visibility
+implications — since balances are computed on read from current data
+(this doc's chosen approach, see below), correcting a mis-tagged envelope
+is expected to retroactively update that envelope's past `spend(m)` and
+`running_balance`, the same way fixing a data-entry mistake should.
 
 If a `Transaction` is deleted, its `BudgetAssignment` rows are deleted with
-it (cascade). Editing a transaction in a way that would violate the
-invariant above for any of its existing assignments — shrinking `amount`
-below the current assignment sum, or flipping its sign while assignments
-exist — is rejected; the assignments must be adjusted first.
+it (cascade).
 
 ### Settlement
 - `id`
