@@ -238,27 +238,37 @@ If a `Transaction` is deleted, its `BudgetAssignment` rows are deleted with
 it (cascade).
 
 ### Settlement
-- `id`
+- `id` (all fields immutable once set — see below)
 - `budget_id`
 - `month`
 - `type` (`accept` | `transfer`)
 - `from_user_id` (the debtor — the member whose negative `balance` this row
-  resolves)
+  resolves; must currently or previously have held `BudgetMembership` for
+  `budget_id`, and must differ from `to_user_id` — no self-settlement)
 - `to_user_id` (the creditor — the member whose positive `balance` this row
-  resolves)
+  resolves; same membership constraint as `from_user_id`)
 - `amount`
 - `created_at`
 - `created_by`
 
 Records how an outstanding balance between exactly two members of a budget
-was resolved for a given month, moving both `balance(from_user_id)` and
-`balance(to_user_id)` toward `0` by `amount`. Both `from_user_id` and
-`to_user_id` are always set, for both types — the only difference is
-whether money actually moved: `transfer` means `from_user_id` paid
-`to_user_id` that amount; `accept` means `to_user_id` (the creditor) agreed
-to forgive it, with no money moving. For a budget with more than two
+was resolved for a given month, moving both `balance(from_user_id, M)` and
+`balance(to_user_id, M)` toward `0` by `amount` for every `M >= month`. Both
+`from_user_id` and `to_user_id` are always set, for both types — the only
+difference is whether money actually moved: `transfer` means `from_user_id`
+paid `to_user_id` that amount; `accept` means `to_user_id` (the creditor)
+agreed to forgive it, with no money moving. For a budget with more than two
 members, fully resolving a month's imbalances may require multiple
 `Settlement` rows, each still tying exactly one debtor to one creditor.
+
+Like `Commitment` and `EnvelopeAllocation`, a `Settlement` row is
+**immutable and undeletable** once created — it isn't versioned the same
+way (there's no "latest applicable row" lookup for it), but for the same
+underlying reason: `balance(user, M)` sums every `Settlement` with
+`month <= M`, so a silently-editable `amount`/`from_user_id`/`to_user_id`,
+or a deleted row, would retroactively rewrite every later `balance`
+figure. To correct a mistaken settlement, record a new offsetting
+`Settlement` rather than editing or deleting the original.
 
 ## Visibility rules
 
@@ -366,35 +376,37 @@ settled, the same way `Envelope.running_balance` does:
 Household budget, commitments: you $1000/month, partner $1200/month
 (total committed $2200). This is the first month this budget has any
 history, so the cumulative and single-month figures coincide. Actual spend
-this month: you $1450 (personal-account purchases assigned to Household),
-partner $1000 — no joint-account spend was assigned to the budget this
-month, so `total_spend` equals the sum of personal spend here; if it had,
-`total_variance` would include it while `monthly_delta` still would not.
+this month (call it `M0`): you $1450 (personal-account purchases assigned
+to Household), partner $1000 — no joint-account spend was assigned to the
+budget this month, so `total_spend(M0)` equals the sum of personal spend
+here; if it had, `total_variance(M0)` would include it while
+`monthly_delta(user, M0)` still would not.
 
-- `monthly_delta(you)` = 1450 − 1000 = **+450**
-- `monthly_delta(partner)` = 1000 − 1200 = **−200**
-- `total_spend` = 1450 + 1000 = **2450**
-- `total_variance` = 2450 − 2200 = **+250** (household overspent by $250
-  this month)
-- With no prior history, `balance(you) = +450` and `balance(partner) = −200`
-  going into settlement.
+- `monthly_delta(you, M0)` = 1450 − 1000 = **+450**
+- `monthly_delta(partner, M0)` = 1000 − 1200 = **−200**
+- `total_spend(M0)` = 1450 + 1000 = **2450**
+- `total_variance(M0)` = 2450 − 2200 = **+250** (household overspent by
+  $250 this month)
+- With no prior history, `balance(you, M0) = +450` and
+  `balance(partner, M0) = −200` going into settlement.
 
 Say you record a `transfer` (`from_user_id`: partner, `to_user_id`: you,
-`amount`: $200 — partner pays you). That brings `balance(partner)` to
-`−200 + 200 = 0`, and `balance(you)` to `450 − 200 = 250` — **not** zero:
-partner's shortfall against *their own* commitment is now fully covered,
-but your $250 remaining balance is the sum of both members'
-`monthly_delta` (`450 + (−200) = 250`), which a two-party transfer
-structurally cannot erase (see "Important consequence" above). It happens
-to equal `total_variance` ($250) too in this example only because no
-joint-account spend was assigned to the budget that month — in general the
-two are different figures (see "Important consequence"). With
-partner's balance already at `0`, there's no debtor left to record an
-`accept` against, either — `Settlement` always requires a genuine
-debtor/creditor pair. In practice your $250 simply carries forward as your
-`balance` until a future month's underspend offsets it, or you two
-renegotiate commitments upward; the data model doesn't provide a way for
-one member to unilaterally write off their own residual balance.
+`amount`: $200) with `month = M0` (partner pays you). That brings
+`balance(partner, M0)` to `−200 + 200 = 0`, and `balance(you, M0)` to
+`450 − 200 = 250` — **not** zero: partner's shortfall against *their own*
+commitment is now fully covered, but your $250 remaining balance is the
+sum of both members' `monthly_delta(user, M0)` (`450 + (−200) = 250`),
+which a two-party transfer structurally cannot erase (see "Important
+consequence" above). It happens to equal `total_variance(M0)` ($250) too
+in this example only because no joint-account spend was assigned to the
+budget that month — in general the two are different figures (see
+"Important consequence"). With partner's balance already at `0`, there's
+no debtor left to record an `accept` against, either — `Settlement` always
+requires a genuine debtor/creditor pair. In practice your $250 simply
+carries forward as `balance(you, M)` for every later `M` until a future
+month's underspend offsets it, or you two renegotiate commitments upward;
+the data model doesn't provide a way for one member to unilaterally write
+off their own residual balance.
 
 ## Envelope tracking (rollover budgeting)
 
