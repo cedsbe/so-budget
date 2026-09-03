@@ -184,6 +184,7 @@ rule as `Commitment`: the applicable row for month `m` is the latest
 - `amount`
 - `created_at` (used by Visibility rule 1 to determine budget membership
   as of the moment this assignment was created)
+- `created_by`
 
 Links a transaction (or a portion of it) to a budget, optionally tagging
 that portion with one envelope within the budget. A single transaction can
@@ -298,20 +299,29 @@ settled, the same way `Envelope.running_balance` does:
   where `user = to_user_id`. (A settlement's own `month` marks which
   month's running balance it's intended to true up, but its effect is
   permanent from that point forward — it's netted into every later `M`
-  too, not just that one month.)
+  too, not just that one month.) As with `running_balance` above, both
+  terms of `monthly_delta` are `0` for any month before the user has an
+  applicable `Commitment` or a solely-owned assignment on this budget, so
+  the sum has no separate "start month" to track — only months with actual
+  activity contribute.
 - `Settlement.amount` isn't constrained by the data model to match the
   computed `balance` at recording time — the app layer is expected to
   suggest the computed figure, but recording a different amount is
   structurally legal and simply changes the running balance accordingly.
 - **Important consequence:** a `transfer` or `accept` always moves
   `balance(from_user_id, M)` up by `amount` and `balance(to_user_id, M)`
-  down by the same `amount` — it redistributes between the two named
-  members but never changes their *sum*. Summed across a budget's members,
-  `balance` cannot be brought to zero by settlement alone if cumulative
-  `total_variance` is nonzero: settling only moves the household's
-  overspend/underspend around between members, it doesn't erase it. That
-  can only shrink over time by future months running the other way, or by
-  raising commitments — the data model doesn't otherwise resolve it.
+  down by the same `amount`. Every other member's balance is untouched, so
+  this redistributes without changing the *sum* of all members' balances —
+  true for any number of members, not just two. That sum, cumulatively, is
+  `sum over members of sum over m<=M of monthly_delta(user, m)` — **not**
+  cumulative `total_variance`. The two are different quantities:
+  `total_variance` also includes joint-account spend (via `total_spend`),
+  which `monthly_delta` excludes by construction; they coincide only in
+  periods with zero joint-account spend assigned to the budget. So the
+  residual a household can never eliminate through settlement alone is the
+  cumulative sum of members' `monthly_delta`, not `total_variance` — it can
+  only shrink via future months running the other way, or by raising
+  commitments.
 
 ### Example (from the design conversation)
 
@@ -335,9 +345,12 @@ Say you record a `transfer` (`from_user_id`: partner, `to_user_id`: you,
 `amount`: $200 — partner pays you). That brings `balance(partner)` to
 `−200 + 200 = 0`, and `balance(you)` to `450 − 200 = 250` — **not** zero:
 partner's shortfall against *their own* commitment is now fully covered,
-but your $250 remaining balance is exactly the household's `total_variance`
-— spend that exceeded the *combined* commitment, which a two-party transfer
-structurally cannot erase (see "Important consequence" above). With
+but your $250 remaining balance is the sum of both members'
+`monthly_delta` (`450 + (−200) = 250`), which a two-party transfer
+structurally cannot erase (see "Important consequence" above). It happens
+to equal `total_variance` ($250) too in this example only because no
+joint-account spend was assigned to the budget that month — in general the
+two are different figures (see "Important consequence"). With
 partner's balance already at `0`, there's no debtor left to record an
 `accept` against, either — `Settlement` always requires a genuine
 debtor/creditor pair. In practice your $250 simply carries forward as your
@@ -386,10 +399,12 @@ running balance going into March is $80 − $60 = **+$20**.
   `spend(m)`) sums raw amounts with no currency check. Mixing currencies
   within a household would silently produce meaningless totals rather than
   an error. Acceptable for v1; real multi-currency support is out of scope.
-- Who may edit/delete a `BudgetAssignment` after creation (only its creator,
-  or any budget member?), and who may create a `Commitment` or
-  `EnvelopeAllocation` (any budget member, or is it restricted?), are not
-  yet decided — flagged for the implementation plan.
+- Who may edit/delete a `BudgetAssignment` after creation (only its
+  `created_by`, or any budget member?), and who may create a `Commitment`
+  or `EnvelopeAllocation` (any budget member, or is it restricted?), are
+  not yet decided — flagged for the implementation plan. (The `created_by`
+  field needed to support a "creator-only" policy is present on all three
+  entities; only the policy itself is undecided.)
 - Whether a `Budget` can be deleted/archived, and what happens to its
   historical `Commitment`/`Settlement` records when it is, is not yet
   decided.
