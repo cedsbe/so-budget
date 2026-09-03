@@ -25,8 +25,10 @@ In scope:
 - Transactions and their visibility rules
 - Budgets, budget membership, and assigning transactions (or portions of
   them) to budgets
-- Per-budget monthly commitments, actual-spend tracking, and settlement
-  (who owes whom, and how imbalances get resolved)
+- Per-budget monthly commitments, actual-spend tracking, and the running
+  balance/settlement records used to track who owes whom (the policy for
+  *how* a given imbalance should be divided is a UX/product decision, out
+  of scope — see Open Questions)
 - Envelopes (YNAB-style category budgeting) nested within a budget, with
   rollover balances and versioned allocation history
 
@@ -51,9 +53,14 @@ Out of scope (future design docs):
 - `household_id`
 - `user_id`
 - `joined_at`
+- `left_at` (nullable)
 
 A household supports any number of members (starting usage will typically be
-2, but the model does not assume exactly 2).
+2, but the model does not assume exactly 2). This entity is given the same
+`left_at` shape as `BudgetMembership`, for structural consistency, but what
+removal actually *does* to the user's accounts/budgets/commitments is still
+an open question (see below) — this only ensures the schema doesn't
+foreclose answering it later.
 
 ### Account
 - `id`
@@ -74,7 +81,11 @@ current ownership. Ownership changes (e.g. converting a personal account to
 joint) are expected to be rare/administrative, and visibility (see
 Visibility rule 1) follows current ownership: it is not treated as a
 consent-driven sharing action the way budget membership is, so it is not
-covered by the "not retroactively revoked" principle.
+covered by the "not retroactively revoked" principle. **Invariant:** an
+`Account` must always retain at least one owner; removing its last
+remaining `AccountOwnership` row is disallowed (ownership must be
+transferred to someone else first, or the account archived — archival is
+undecided, see Open Questions).
 
 ### Transaction
 - `id`
@@ -95,8 +106,14 @@ account's currency.
 Budgets are arbitrary and user-defined (e.g. "Household", "Vacation",
 "Kids") — there is no fixed "personal" vs. "shared" type. A budget with one
 member behaves like a personal budget; a budget with two or more members
-behaves like a shared one. Settlement math (see below) only applies to
-budgets with 2+ members with commitments defined.
+behaves like a shared one. Settlement math (see below) is only meaningful
+for budgets with 2+ members — it's computed per-member using
+`committed(user)`, which is `0` for any member who has never set a
+`Commitment`. That's an ordinary case, not an error: a member with no
+commitment simply has `balance(user) = actual(user)`, so their balance
+tracks their spend one-for-one until they set a commitment. The app is
+expected to prompt members to set one before relying on settlement figures,
+but the data model doesn't require it.
 
 ### BudgetMembership
 - `budget_id`
@@ -108,7 +125,12 @@ Unlike `AccountOwnership`, this **is** versioned: leaving a budget sets
 `left_at` rather than deleting the row, so past membership windows stay
 queryable. This is what makes Visibility rule 4 well-defined (see below):
 visibility granted by a `BudgetAssignment` depends on membership *at the
-time the assignment was created*, not on live membership.
+time the assignment was created*, not on live membership. A user may have
+more than one `BudgetMembership` row for the same budget over time (leave,
+then rejoin later): each row is its own non-overlapping `[joined_at,
+left_at)` window, and "was a member at time T" means T falls inside any one
+of them — there's no assumption of a single lifetime window per
+`(budget_id, user_id)` pair.
 
 ### Commitment
 - `id`
@@ -117,6 +139,7 @@ time the assignment was created*, not on live membership.
 - `amount`
 - `effective_from` (month)
 - `created_at`
+- `created_by`
 
 Represents how much a member has committed to contribute to a budget per
 month. **Immutable and versioned**: changing a commitment inserts a new row
@@ -213,9 +236,10 @@ members, fully resolving a month's imbalances may require multiple
    - they currently own the transaction's `Account` (via `AccountOwnership`
      — this check uses live ownership, since it is unversioned), **or**
    - the transaction has at least one `BudgetAssignment` to a `Budget` of
-     which the user was a member (via `BudgetMembership`, i.e.
-     `joined_at <= assignment.created_at < left_at` or `left_at` still
-     null) **at the time that `BudgetAssignment` was created**.
+     which the user was a member **at the time that `BudgetAssignment` was
+     created** — i.e. some `BudgetMembership` row for that user/budget has
+     `joined_at <= assignment.created_at` and (`left_at` is null or
+     `assignment.created_at < left_at`).
 2. Visibility is all-or-nothing at the transaction level: once visible, the
    full transaction (merchant, full amount, date, account) is shown — not
    just the assigned slice. (Default behavior; a per-assignment "share only
@@ -239,66 +263,87 @@ event-sourced — household transaction volume is small enough that this is
 never a performance concern, and it keeps the model simple to reason about
 and audit.
 
-For a given `Budget` and `month`:
+For a given `Budget`, single-month figures:
 
-- `committed(user)` = that user's applicable `Commitment.amount` for the
-  month (see versioning rule above).
-- `actual(user)` = sum of `BudgetAssignment.amount` for that budget/month,
-  restricted to transactions whose account is **solely owned** by that user.
-  Joint-account transactions assigned to the budget are excluded from this
-  per-user total — that money is already shared/pooled, so it reduces the
-  household's picture of total spend but isn't attributed to either
-  individual for settlement purposes.
-- `balance(user)` = `actual(user) − committed(user)`. Positive means the
-  user paid more than they committed (they're owed reimbursement);
-  negative means they paid less than committed (they owe).
-- `total_spend(month)` = sum of **all** `BudgetAssignment.amount` for the
-  budget/month, regardless of which account (personal or joint) the
-  transaction came from. Unlike `actual(user)`, this is not restricted to
-  solely-owned accounts — it's the household's full picture of what was
-  spent against the budget.
-- `total_variance(month)` = `total_spend(month) − sum(committed)`, where
-  the sum ranges over every user who has ever had a `BudgetMembership` row
-  for this budget (current or past — `committed(user)` is `0` for anyone
-  without an applicable `Commitment`, so including former members is always
-  safe, and keeps this symmetric with `total_spend`, which likewise counts
-  all assignments regardless of current membership). This is deliberately
-  not the same as `sum(actual(user))`, which excludes joint-account spend;
-  `total_variance` is the only figure that includes it.
-- Outstanding `Settlement` records for the budget/month reduce the balance
-  of both the named debtor (`from_user_id`) and creditor (`to_user_id`)
-  toward `0` by `amount`: `accept` does this with no money moving;
-  `transfer` records an actual payment. The data model does not constrain
-  `Settlement.amount` to match the computed `balance(user)` — the app layer
-  is expected to suggest the computed figure, but recording a different
-  amount is structurally legal and simply changes the running balance
-  accordingly.
-- **Unsettled balances carry forward** month over month as a running total
-  per user, until settled via `accept` or `transfer`.
+- `committed(user, m)` = that user's applicable `Commitment.amount` for
+  month `m` (see versioning rule above).
+- `actual(user, m)` = sum of `BudgetAssignment.amount` for that budget in
+  month `m`, restricted to transactions whose account is **solely owned**
+  by that user. Joint-account transactions assigned to the budget are
+  excluded from this per-user total — that money is already shared/pooled,
+  so it isn't attributed to either individual for settlement purposes.
+- `monthly_delta(user, m)` = `actual(user, m) − committed(user, m)`.
+  Positive means the user paid more that month than they'd committed to;
+  negative means they paid less.
+- `total_spend(m)` = sum of **all** `BudgetAssignment.amount` for the
+  budget in month `m`, regardless of which account (personal or joint) the
+  transaction came from — unlike `actual(user, m)`, not restricted to
+  solely-owned accounts.
+- `total_variance(m)` = `total_spend(m) − sum(committed(user, m))`, summed
+  over every user who has ever had a `BudgetMembership` row for this budget
+  (current or past — `committed` defaults to `0` for anyone without an
+  applicable `Commitment`, so including former members is always safe, and
+  this stays symmetric with `total_spend`, which likewise counts all
+  assignments regardless of current membership). This is deliberately not
+  the same as `sum(monthly_delta(user, m))`, which excludes joint-account
+  spend; `total_variance` is the only figure that includes it.
+
+The figure that actually answers "who owes whom right now" is cumulative,
+**not** the single-month `monthly_delta` — it carries forward until
+settled, the same way `Envelope.running_balance` does:
+
+- `balance(user, M)` = `sum over every month m <= M of monthly_delta(user, m)`,
+  **plus** `amount` for every `Settlement` (this budget, `month <= M`)
+  where `user = from_user_id`, **minus** `amount` for every `Settlement`
+  where `user = to_user_id`. (A settlement's own `month` marks which
+  month's running balance it's intended to true up, but its effect is
+  permanent from that point forward — it's netted into every later `M`
+  too, not just that one month.)
+- `Settlement.amount` isn't constrained by the data model to match the
+  computed `balance` at recording time — the app layer is expected to
+  suggest the computed figure, but recording a different amount is
+  structurally legal and simply changes the running balance accordingly.
+- **Important consequence:** a `transfer` or `accept` always moves
+  `balance(from_user_id, M)` up by `amount` and `balance(to_user_id, M)`
+  down by the same `amount` — it redistributes between the two named
+  members but never changes their *sum*. Summed across a budget's members,
+  `balance` cannot be brought to zero by settlement alone if cumulative
+  `total_variance` is nonzero: settling only moves the household's
+  overspend/underspend around between members, it doesn't erase it. That
+  can only shrink over time by future months running the other way, or by
+  raising commitments — the data model doesn't otherwise resolve it.
 
 ### Example (from the design conversation)
 
 Household budget, commitments: you $1000/month, partner $1200/month
-(total committed $2200). Actual spend this month: you $1450 (personal-account
-purchases assigned to Household), partner $1000 — no joint-account spend was
-assigned to the budget this month, so `total_spend` equals the sum of
-personal spend here; if it had, `total_variance` would include it while
-`balance(you)`/`balance(partner)` still would not.
+(total committed $2200). This is the first month this budget has any
+history, so the cumulative and single-month figures coincide. Actual spend
+this month: you $1450 (personal-account purchases assigned to Household),
+partner $1000 — no joint-account spend was assigned to the budget this
+month, so `total_spend` equals the sum of personal spend here; if it had,
+`total_variance` would include it while `monthly_delta` still would not.
 
-- `balance(you)` = 1450 − 1000 = **+450**
-- `balance(partner)` = 1000 − 1200 = **−200**
+- `monthly_delta(you)` = 1450 − 1000 = **+450**
+- `monthly_delta(partner)` = 1000 − 1200 = **−200**
 - `total_spend` = 1450 + 1000 = **2450**
 - `total_variance` = 2450 − 2200 = **+250** (household overspent by $250
   this month)
+- With no prior history, `balance(you) = +450` and `balance(partner) = −200`
+  going into settlement.
 
-The app surfaces both: partner owes you a net amount reflecting the +450/−200
-split, and the household overspent by $250 relative to its combined
-commitment. Settling could be a `transfer` (`from_user_id`: partner,
-`to_user_id`: you, `amount`: $200 — partner pays you, zeroing both
-balances) and/or an `accept` (same `from_user_id`/`to_user_id`, but you as
-the creditor forgive some or all of it instead) — the model doesn't
-prescribe how the $250 combined overspend gets divided, only that a
-`Settlement` row records what you decided.
+Say you record a `transfer` (`from_user_id`: partner, `to_user_id`: you,
+`amount`: $200 — partner pays you). That brings `balance(partner)` to
+`−200 + 200 = 0`, and `balance(you)` to `450 − 200 = 250` — **not** zero:
+partner's shortfall against *their own* commitment is now fully covered,
+but your $250 remaining balance is exactly the household's `total_variance`
+— spend that exceeded the *combined* commitment, which a two-party transfer
+structurally cannot erase (see "Important consequence" above). With
+partner's balance already at `0`, there's no debtor left to record an
+`accept` against, either — `Settlement` always requires a genuine
+debtor/creditor pair. In practice your $250 simply carries forward as your
+`balance` until a future month's underspend offsets it, or you two
+renegotiate commitments upward; the data model doesn't provide a way for
+one member to unilaterally write off their own residual balance.
 
 ## Envelope tracking (rollover budgeting)
 
@@ -342,8 +387,9 @@ running balance going into March is $80 − $60 = **+$20**.
   within a household would silently produce meaningless totals rather than
   an error. Acceptable for v1; real multi-currency support is out of scope.
 - Who may edit/delete a `BudgetAssignment` after creation (only its creator,
-  or any budget member?) is not yet decided — flagged for the implementation
-  plan.
+  or any budget member?), and who may create a `Commitment` or
+  `EnvelopeAllocation` (any budget member, or is it restricted?), are not
+  yet decided — flagged for the implementation plan.
 - Whether a `Budget` can be deleted/archived, and what happens to its
   historical `Commitment`/`Settlement` records when it is, is not yet
   decided.
@@ -358,7 +404,7 @@ running balance going into March is $80 − $60 = **+$20**.
   historical `EnvelopeAllocation` rows and running balance when it is, is
   not yet decided.
 - What happens when a user is removed from a `Household`
-  (`HouseholdMembership` deleted) — their solely-owned accounts, budget
+  (`HouseholdMembership.left_at` set) — their solely-owned accounts, budget
   memberships, and commitments would become orphaned — is explicitly
   deferred. Not addressed in v1; worth its own design pass if/when the app
   needs to support it.
