@@ -30,7 +30,10 @@ In scope:
   *how* a given imbalance should be divided is a UX/product decision, out
   of scope — see Open Questions)
 - Envelopes (YNAB-style category budgeting) nested within a budget, with
-  rollover balances and versioned allocation history
+  rollover balances and versioned allocation history, optionally organized
+  into one level of envelope groups
+- Marking a transaction as a self-transfer, excluded from budget
+  assignment to prevent double-counting money moved between own accounts
 
 Out of scope (future design docs):
 - Technology/framework/storage choices
@@ -103,9 +106,26 @@ undecided, see Open Questions).
 - `date`
 - `amount` (signed; negative for refunds/credits, by convention)
 - `description` / `merchant`
+- `is_transfer` (boolean, default `false`, mutable)
 
 A transaction always belongs to exactly one account and inherits that
 account's currency.
+
+`is_transfer` marks a transaction as money moving between the user's own
+accounts (e.g. a checking withdrawal that pays off a credit card) rather
+than real spend — structurally, `BudgetAssignment` creation is disallowed
+for a transaction with `is_transfer = true` (see Visibility rule 3a),
+preventing self-transfers from being double-counted as household spend
+once on the source account and again for the underlying purchases already
+recorded on the destination account. This is deliberately a per-transaction
+flag with no linkage between the two sides of a transfer (no attempt to
+match "this checking withdrawal corresponds to that credit card payment")
+— pairing transfers automatically is a bank-sync/import-time concern, out
+of scope here; each transaction is just independently marked. `is_transfer`
+can be toggled at any time, except that setting it to `true` is rejected
+while the transaction has any `BudgetAssignment` rows — those must be
+deleted first, the same edit-rejection pattern used elsewhere in this
+document rather than a silent cascade.
 
 ### Budget
 - `id`
@@ -169,17 +189,38 @@ changing what `balance` even measures (proportional-share fairness, not
 promise-vs-actual). Fixed amounts are sufficient for how this household
 plans to use commitments; this may be revisited if that changes.
 
+### EnvelopeGroup
+- `id`
+- `budget_id` (immutable once set, same reasoning as `Envelope.budget_id`
+  below)
+- `name`
+
+A named organizational grouping of envelopes within a budget (e.g.
+"Immediate Obligations" containing the Rent/Insurance/Internet envelopes),
+one level deep — groups do not contain other groups. `EnvelopeGroup` plays
+no role in any formula in this document (`allocation`, `spend`,
+`running_balance` are all defined per-`Envelope`, group membership is
+purely organizational); it exists only so a budget with many envelopes
+doesn't present as one flat list.
+
 ### Envelope
 - `id`
 - `budget_id` (immutable once set — `BudgetAssignment.envelope_id`'s
   same-budget constraint is enforced via a composite reference to
   `(Envelope.id, Envelope.budget_id)`, which only holds if this can't
   change out from under existing assignments)
+- `envelope_group_id` (nullable, mutable; if set, must belong to the same
+  `budget_id` — same composite-reference pattern as `envelope_id` on
+  `BudgetAssignment`)
 - `name`
 
 A named spending category nested within a budget (e.g. the "Household"
 budget contains envelopes "Groceries", "Insurance", "Internet & Mobile").
-Envelopes do not exist independently of a budget.
+Envelopes do not exist independently of a budget. Grouping is optional —
+an envelope with no `envelope_group_id` is simply ungrouped (e.g. a
+"To Review" triage envelope has no obvious group to sit in). Since
+grouping has no effect on any balance calculation, moving an envelope
+between groups (or clearing its group) is unrestricted.
 
 ### EnvelopeAllocation
 - `id`
@@ -307,6 +348,11 @@ figure. To correct a mistaken settlement, record a new offsetting
    they own, and only targeting budgets they are themselves a member of.
    This prevents a user from granting visibility into someone else's
    transaction, or assigning into a budget they don't belong to.
+3a. A user may not create a `BudgetAssignment` for a `Transaction` with
+    `is_transfer = true` (see that field's note). This is a separate,
+    unconditional restriction from rule 3 — it applies even to the
+    transaction's own owner, on any budget — since a self-transfer isn't
+    real spend for any budget to track.
 4. **Assumption:** budget-membership-driven visibility is not retroactively
    revoked — rule 1's second clause checks membership as of the
    assignment's creation time, not live membership, so a member who later
@@ -527,9 +573,11 @@ document's scope — see the bank-sync/import design mentioned under Scope.
 - Settlement UX (how a $250 combined-overspend gets divided into individual
   `accept`/`transfer` actions) is a product/UI decision, not a data-model
   one; this doc only defines the record types involved.
-- Whether an `Envelope` can be deleted/archived, and what happens to its
-  historical `EnvelopeAllocation` rows and running balance when it is, is
-  not yet decided.
+- Whether an `Envelope` or `EnvelopeGroup` can be deleted/archived, and
+  what happens to a deleted envelope's historical `EnvelopeAllocation`
+  rows and running balance (or a deleted group's now-parentless
+  envelopes, though `envelope_group_id` being nullable at least means
+  they wouldn't be left dangling), is not yet decided.
 - What happens when a user is removed from a `Household`
   (`HouseholdMembership.left_at` set) — their solely-owned accounts, budget
   memberships, and commitments would become orphaned — is explicitly
