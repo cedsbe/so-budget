@@ -15,8 +15,10 @@ assigning it (in whole or part) to a budget they belong to.
 This document defines the core data model and the access-control rules that
 govern it: who can own what, who can see what, how transactions get split
 across budgets, and how shared-budget settlement (who owes whom) is
-calculated. It intentionally excludes tech stack, UI, and bank-sync/import —
-those are separate design efforts.
+calculated. It intentionally excludes tech stack, UI, and the detailed
+bank-sync/import design — those are separate design efforts (see the
+scope note on bank-sync below — it's confirmed needed for v1, just not
+designed in this document).
 
 ## Scope
 
@@ -35,11 +37,20 @@ In scope:
 - Marking a transaction as a self-transfer, excluded from budget
   assignment to prevent double-counting money moved between own accounts
 
-Out of scope (future design docs):
+Deferred (future design docs, not needed for v1):
 - Technology/framework/storage choices
 - UI/UX
-- Bank/card sync or manual transaction import
 - Notifications, multi-currency, multi-household membership for a user
+
+Confirmed needed for v1, but not designed here — requires its own
+dedicated design doc:
+- Bank/card sync and transaction import. This directly affects one
+  decision left open in this document: whether `Transaction.is_transfer`
+  stays an independent per-transaction flag or gets upgraded to a linked
+  `transfer_id` pair (see that field's note) — the right answer depends on
+  how transactions actually get imported and matched, which isn't decided
+  yet. Treat the current `is_transfer` design as provisional pending that
+  work, not as a settled decision the way the rest of this document is.
 
 ## Core entities
 
@@ -81,6 +92,7 @@ only ensures the schema doesn't foreclose answering it later.
 - `name`
 - `type` (checking, savings, credit card, ...)
 - `currency`
+- `deleted_at` (nullable — see "Soft-delete" note below)
 
 ### AccountOwnership
 - `account_id`
@@ -119,19 +131,24 @@ preventing self-transfers from being double-counted as household spend
 once on the source account and again for the underlying purchases already
 recorded on the destination account. This is deliberately a per-transaction
 flag with no linkage between the two sides of a transfer (no attempt to
-match "this checking withdrawal corresponds to that credit card payment")
-— pairing transfers automatically is a bank-sync/import-time concern, out
-of scope here; each transaction is just independently marked. `is_transfer`
-can be toggled at any time, except that setting it to `true` is rejected
-while the transaction has any `BudgetAssignment` rows — those must be
-deleted first, the same edit-rejection pattern used elsewhere in this
-document rather than a silent cascade.
+match "this checking withdrawal corresponds to that credit card payment").
+**Provisional:** whether transfers need to be automatically paired (e.g. a
+linked `transfer_id`, the way Actual Budget does it) instead of relying on
+each side being independently marked depends on how bank-sync/import
+actually works, which is confirmed needed for v1 but not yet designed —
+see the Scope section. Until that design happens, each transaction is just
+independently marked, with no cross-account matching. `is_transfer` can be
+toggled at any time, except that setting it to `true` is rejected while
+the transaction has any `BudgetAssignment` rows — those must be deleted
+first, the same edit-rejection pattern used elsewhere in this document
+rather than a silent cascade.
 
 ### Budget
 - `id`
 - `household_id`
 - `name`
 - `created_by` (user_id)
+- `deleted_at` (nullable — see "Soft-delete" note below)
 
 Budgets are arbitrary and user-defined (e.g. "Household", "Vacation",
 "Kids") — there is no fixed "personal" vs. "shared" type. A budget with one
@@ -194,6 +211,7 @@ plans to use commitments; this may be revisited if that changes.
 - `budget_id` (immutable once set, same reasoning as `Envelope.budget_id`
   below)
 - `name`
+- `deleted_at` (nullable — see "Soft-delete" note below)
 
 A named organizational grouping of envelopes within a budget (e.g.
 "Immediate Obligations" containing the Rent/Insurance/Internet envelopes),
@@ -213,6 +231,7 @@ doesn't present as one flat list.
   `budget_id` — same composite-reference pattern as `envelope_id` on
   `BudgetAssignment`)
 - `name`
+- `deleted_at` (nullable — see "Soft-delete" note below)
 
 A named spending category nested within a budget (e.g. the "Household"
 budget contains envelopes "Groceries", "Insurance", "Internet & Mobile").
@@ -221,6 +240,24 @@ an envelope with no `envelope_group_id` is simply ungrouped (e.g. a
 "To Review" triage envelope has no obvious group to sit in). Since
 grouping has no effect on any balance calculation, moving an envelope
 between groups (or clearing its group) is unrestricted.
+
+### Soft-delete convention (Account, Budget, Envelope, EnvelopeGroup)
+
+These four entities are never hard-deleted — "deleting" one sets
+`deleted_at` to the current time rather than removing the row. This
+resolves what was previously an open question for each of them in one
+consistent stroke: every historical `Commitment`, `EnvelopeAllocation`,
+`BudgetAssignment`, and `Settlement` row keeps referencing a real,
+unchanged parent row, so nothing about past balances or visibility breaks
+when an account/budget/envelope/group is retired. A soft-deleted row
+simply stops appearing in active lists (e.g. as a target for new
+`BudgetAssignment`/`Commitment`/`EnvelopeAllocation` rows) but remains
+valid for anything that already references it. `AccountOwnership`'s
+last-owner invariant applies to soft-deleting an `Account` the same way it
+applies to removing its last owner. This convention doesn't extend to the
+ledger entities themselves (`Commitment`, `EnvelopeAllocation`,
+`BudgetAssignment`, `Settlement`) — those follow their own, already-stated
+immutability/deletion rules.
 
 ### EnvelopeAllocation
 - `id`
@@ -567,17 +604,9 @@ document's scope — see the bank-sync/import design mentioned under Scope.
   user outside the household from owning an account or belonging to a
   budget inside it. Same class of gap as the currency assumption above:
   a convention the data model doesn't enforce, acceptable for v1.
-- Whether a `Budget` can be deleted/archived, and what happens to its
-  historical `Commitment`/`Settlement` records when it is, is not yet
-  decided.
 - Settlement UX (how a $250 combined-overspend gets divided into individual
   `accept`/`transfer` actions) is a product/UI decision, not a data-model
   one; this doc only defines the record types involved.
-- Whether an `Envelope` or `EnvelopeGroup` can be deleted/archived, and
-  what happens to a deleted envelope's historical `EnvelopeAllocation`
-  rows and running balance (or a deleted group's now-parentless
-  envelopes, though `envelope_group_id` being nullable at least means
-  they wouldn't be left dangling), is not yet decided.
 - What happens when a user is removed from a `Household`
   (`HouseholdMembership.left_at` set) — their solely-owned accounts, budget
   memberships, and commitments would become orphaned — is explicitly
