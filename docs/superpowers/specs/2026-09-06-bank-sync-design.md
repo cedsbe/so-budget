@@ -86,16 +86,35 @@ Out of scope:
   it to `reauth_required`; any other sync failure (e.g. transient
   API/rate-limit error) sets it to `error`. A successful `access_url`
   update (passing the overlap check above) or a successful sync run
-  resets it to `ok`. **`error` connections are still attempted on every
-  sync run — only `reauth_required` ones are excluded** (see the Sync
-  process gate below); otherwise a merely transient failure with a
-  perfectly valid credential would permanently strand the connection,
-  since nothing would ever attempt a sync that could reset it back to
-  `ok`. `reauth_required` connections are excluded because retrying
-  without a credential fix is pointless — they resume once `access_url`
-  is updated)
+  resets it to `ok` and `consecutive_failures` (below) to `0`. `error`
+  connections are still attempted on every sync run — only
+  `reauth_required` ones are excluded (see the Sync process gate below);
+  otherwise a merely transient failure with a perfectly valid credential
+  would permanently strand the connection, since nothing would ever
+  attempt a sync that could reset it back to `ok`. `reauth_required`
+  connections are excluded because retrying without a credential fix is
+  pointless — they resume once `access_url` is updated)
+- `consecutive_failures` (integer, defaults `0`; incremented on each
+  failed sync attempt, reset to `0` on any successful one. Once it
+  reaches a threshold — proposing 5 — the connection escalates to
+  `reauth_required` even though the actual cause may not be a credential
+  problem. `error` alone has no way for a genuinely permanent failure
+  [SimpleFin dropping the institution entirely, an access_url format
+  that will never work again] to ever surface to the user — indefinite
+  silent retry on every scheduled run wouldn't distinguish "transient
+  blip, will self-heal" from "permanently broken." Escalating reuses the
+  existing "stop auto-retrying, needs the user's attention" mechanism
+  already built for `reauth_required` rather than inventing a second one,
+  even though updating `access_url` may not actually be the right fix in
+  every case — that's a UI-layer concern for a later design)
 - `created_at`
-- `last_synced_at` (nullable)
+- `last_synced_at` (nullable) — advances only on a **successful** sync
+  completion; a failed attempt (incrementing `consecutive_failures`
+  instead) never advances it. This matters now that `error` connections
+  retry every run rather than being excluded: step 1 fetches
+  transactions "since the last sync," so if a failed attempt advanced
+  this anyway, a run of failures followed by eventual success could
+  silently skip whatever occurred during the failure window.
 - `deleted_at` (nullable — soft-delete, consistent with the core doc's
   convention: disconnecting stops future syncs but leaves everything
   already imported untouched)
@@ -121,10 +140,18 @@ Out of scope:
   `Account` belonging to the connecting user's household — not
   necessarily solely owned by them, since linking a joint account is
   legitimate, but it must be a household account, not an arbitrary one.)
-- `linked_at` (nullable, set when `account_id` is set)
+- `linked_at` (nullable, set when `account_id` is set, cleared back to
+  `null` whenever `account_id` is — the two are always both-set or
+  both-null together, so `linked_at` never holds a stale value for a
+  currently-unlinked row)
 
-Linking an account triggers a backfill sync for its available history.
-How far back that history goes is determined by SimpleFin/the
+Linking an account triggers a **backfill sync**: an immediate run of
+step 3 (transaction import) followed by step 5 (transfer-match
+suggestion) below, scoped just to this newly-linked account, using its
+full available history as the range instead of "since the last sync."
+Steps 1, 2, and 4 don't apply to a single already-identified account
+being linked, so backfill isn't the full 1-5 sequence — just import and
+match. How far back that history goes is determined by SimpleFin/the
 institution, not something this app controls.
 
 `account_id` can be **cleared** (set back to `null`, returning the row to
@@ -150,7 +177,24 @@ not a mistake to guard against. It's also the exact mechanism behind the
 it is what creates that risk, and this document doesn't yet resolve the
 tension between the two.
 
-### `Transaction` — four new fields (extends the core domain model)
+### TransferMatchDismissal
+- `id`
+- `transaction_id_a` / `transaction_id_b` (the rejected pair, stored in a
+  canonical order — e.g. the smaller `id` first — so a pair is only ever
+  recorded once regardless of which side the rejection was actioned from)
+- `dismissed_at`
+- `dismissed_by`
+
+Records a specific rejected suggestion as a **pair**, not as a property of
+either transaction alone. This matters: a false-positive suggestion (e.g.
+two unrelated transactions that coincidentally share an amount) should
+only rule out *that* pairing, not permanently block either transaction
+from ever being matched against its actual counterpart later. The
+matching query in step 5 excludes a candidate pair if a
+`TransferMatchDismissal` already exists for it, but each transaction
+individually remains eligible against every other candidate.
+
+### `Transaction` — three new fields (extends the core domain model)
 - `imported_id` (nullable) — SimpleFin's transaction ID. Used as the
   upsert key so repeated syncs update existing rows instead of creating
   duplicates. When an existing `imported_id` posts with a `pending`
@@ -173,14 +217,14 @@ tension between the two.
   the core doc's provisional note. `is_transfer` remains independently
   settable (e.g. a cash withdrawal with no corresponding linked account
   to match against); `transfer_id` is set on *both* sides only once a
-  suggested match (see below) is explicitly confirmed.
-- `transfer_match_dismissed_at` (nullable, system/user-managed) — set
-  when a user explicitly rejects a suggested transfer match involving
-  this transaction. Excluded from future transfer-match candidate
-  queries, the same as a transaction with a `transfer_id` or
-  `BudgetAssignment` already is — without this, a rejected suggestion
-  would simply reappear on every subsequent sync, since rejecting it
-  doesn't otherwise change any field's value.
+  suggested match (see below) is explicitly confirmed. Rejecting a
+  suggestion (rather than confirming it) records a `TransferMatchDismissal`
+  for that specific pair instead of changing anything on `Transaction`
+  itself — without this, a rejected suggestion would simply reappear on
+  every subsequent sync, since rejecting it doesn't otherwise change any
+  field's value, but scoping the record to the pair (not the transaction)
+  keeps either side eligible against a different, correct counterpart
+  later.
 
 ## Sync process
 
@@ -227,8 +271,9 @@ per that field's reset-path note above:
    ordinary unpaired transaction by the time this step's query runs, and
    is eligible for a fresh match in the same run rather than waiting for
    the next sync). A matching query looks for candidate pairs among
-   transactions with no `transfer_id`, no `transfer_match_dismissed_at`,
-   and no `BudgetAssignment` yet — on **two different accounts**
+   transactions with no `transfer_id` and no `BudgetAssignment` yet,
+   excluding any specific pair that already has a `TransferMatchDismissal`
+   — on **two different accounts**
    (excluding same-account pairs, e.g. a purchase and its refund on the
    same card, which trivially "share a common owner" with themselves but
    aren't a transfer between accounts at all), same absolute amount,
@@ -253,16 +298,20 @@ per that field's reset-path note above:
    the date window), the suggestion is discarded rather than confirmed,
    rather than overwriting an existing pairing or conflicting with the
    core model's `BudgetAssignment`/`is_transfer` mutual-exclusion rule.
-   This check-then-set must happen atomically (e.g. a single conditional
-   write per transaction, not a separate read followed by a separate
-   write) — otherwise two overlapping suggestions confirmed at nearly the
-   same moment could both pass the check before either write lands,
-   letting one transaction end up claimed by two different pairs. Once
-   the check passes, confirming sets `is_transfer = true` and
-   `transfer_id` on both sides. Once a transaction has any
-   `BudgetAssignment`, it's implicitly "not a transfer" and drops out of
-   matching; explicitly rejecting a suggestion sets
-   `transfer_match_dismissed_at` to the same effect.
+   This check-then-set must happen as **one atomic database transaction
+   covering both rows** — checking and writing each side with its own
+   separate conditional write is not sufficient, since side A's write
+   could succeed while side B's fails (already claimed by a concurrent
+   confirmation in the interim), leaving A pointing at B while B doesn't
+   point back — an asymmetric pairing, exactly the inconsistency this
+   requirement exists to prevent. Both rows must be checked and written
+   together, or neither is written at all. Once the check passes,
+   confirming sets `is_transfer = true` and `transfer_id` on both sides
+   together. Once a transaction has any `BudgetAssignment`, it's
+   implicitly "not a transfer" and drops out of matching against anyone;
+   explicitly rejecting a suggestion instead records a
+   `TransferMatchDismissal` for that pair only, leaving both transactions
+   eligible against other candidates.
 
    If a transaction's `amount` changes after its transfer pair was
    confirmed (a `pending` transaction posting with a different amount —
@@ -292,8 +341,22 @@ per that field's reset-path note above:
   `access_url` in place (not creating a new `SimpleFinConnection` row)
   preserves all existing `LinkedAccount` mappings and transaction
   history, since those are keyed by `external_account_id`, not by
-  connection identity. The UX for detecting/prompting this is out of
-  scope (UI).
+  connection identity — *when the overlap check accepts the update*. The
+  UX for detecting/prompting this is out of scope (UI).
+- **Duplicate-import risk from a bridge session reset — broader than
+  just joint accounts.** If a household member's SimpleFin Bridge
+  subscription genuinely resets (a new bridge session issuing all-new
+  `external_account_id`s for the same real accounts), the `access_url`
+  overlap check would correctly reject it as "looks like a different set
+  of accounts" — but the only way forward is then a brand-new
+  `SimpleFinConnection`, relinked to the same already-populated
+  `Account` rows, triggering a fresh backfill. Since SimpleFin doesn't
+  guarantee identical `imported_id` values across different bridge
+  sessions for the same real transaction, that backfill can produce
+  **duplicate Transaction rows** — the exact mechanism described below
+  for joint accounts, but arising here from a single user's own
+  connection replacement, not from two people linking the same account.
+  Neither case is resolved in this document.
 - **Joint-account double-import risk.** If, once this household has a
   joint account, *both* members set up their own `SimpleFinConnection`
   and both happen to have online access to the same joint account, each
