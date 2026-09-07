@@ -15,10 +15,10 @@ assigning it (in whole or part) to a budget they belong to.
 This document defines the core data model and the access-control rules that
 govern it: who can own what, who can see what, how transactions get split
 across budgets, and how shared-budget settlement (who owes whom) is
-calculated. It intentionally excludes tech stack, UI, and the detailed
-bank-sync/import design — those are separate design efforts (see the
-scope note on bank-sync below — it's confirmed needed for v1, just not
-designed in this document).
+calculated. It intentionally excludes tech stack, UI, and bank-sync/import
+— those are separate design efforts (bank-sync/import is
+[designed separately](2026-09-06-bank-sync-design.md), not out of scope
+for v1 — see the Scope section).
 
 ## Scope
 
@@ -42,15 +42,13 @@ Deferred (future design docs, not needed for v1):
 - UI/UX
 - Notifications, multi-currency, multi-household membership for a user
 
-Confirmed needed for v1, but not designed here — requires its own
-dedicated design doc:
-- Bank/card sync and transaction import. This directly affects one
-  decision left open in this document: whether `Transaction.is_transfer`
-  stays an independent per-transaction flag or gets upgraded to a linked
-  `transfer_id` pair (see that field's note) — the right answer depends on
-  how transactions actually get imported and matched, which isn't decided
-  yet. Treat the current `is_transfer` design as provisional pending that
-  work, not as a settled decision the way the rest of this document is.
+Designed separately:
+- Bank/card sync and transaction import — see
+  [`2026-09-06-bank-sync-design.md`](2026-09-06-bank-sync-design.md).
+  That document resolves the `Transaction.is_transfer` question left open
+  here: `is_transfer` stays an independent flag (for transfers with no
+  matching linked account), *and* a `transfer_id` field is added for
+  confirmed, matched pairs — both, not an either/or.
 
 ## Core entities
 
@@ -129,19 +127,17 @@ than real spend — structurally, `BudgetAssignment` creation is disallowed
 for a transaction with `is_transfer = true` (see Visibility rule 3a),
 preventing self-transfers from being double-counted as household spend
 once on the source account and again for the underlying purchases already
-recorded on the destination account. This is deliberately a per-transaction
-flag with no linkage between the two sides of a transfer (no attempt to
-match "this checking withdrawal corresponds to that credit card payment").
-**Provisional:** whether transfers need to be automatically paired (e.g. a
-linked `transfer_id`, the way Actual Budget does it) instead of relying on
-each side being independently marked depends on how bank-sync/import
-actually works, which is confirmed needed for v1 but not yet designed —
-see the Scope section. Until that design happens, each transaction is just
-independently marked, with no cross-account matching. `is_transfer` can be
-toggled at any time, except that setting it to `true` is rejected while
-the transaction has any `BudgetAssignment` rows — those must be deleted
-first, the same edit-rejection pattern used elsewhere in this document
-rather than a silent cascade.
+recorded on the destination account. This field is independently settable
+regardless of whether a matching transaction on another account is ever
+found or linked (e.g. a cash withdrawal has no corresponding linked
+account to match against). The bank-sync design
+([`2026-09-06-bank-sync-design.md`](2026-09-06-bank-sync-design.md)) adds
+a separate `transfer_id` field for confirmed, matched transfer pairs —
+`is_transfer` isn't replaced by it, the two work together. `is_transfer`
+can be toggled at any time, except that setting it to `true` is rejected
+while the transaction has any `BudgetAssignment` rows — those must be
+deleted first, the same edit-rejection pattern used elsewhere in this
+document rather than a silent cascade.
 
 ### Budget
 - `id`
@@ -572,8 +568,8 @@ it falls directly out of the primitives already defined:
   envelope for it, not an interim "needs review" state.
 
 What actually populates "To Review" for a new joint-account transaction
-(manual entry vs. future automatic bank-sync import) is outside this
-document's scope — see the bank-sync/import design mentioned under Scope.
+is a bank-sync/import concern, outside this document's scope — see
+[`2026-09-06-bank-sync-design.md`](2026-09-06-bank-sync-design.md).
 
 ## Open questions / explicit assumptions
 
