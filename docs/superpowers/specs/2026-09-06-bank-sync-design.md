@@ -179,9 +179,16 @@ tension between the two.
 
 ### TransferMatchDismissal
 - `id`
-- `transaction_id_a` / `transaction_id_b` (the rejected pair, stored in a
-  canonical order — e.g. the smaller `id` first — so a pair is only ever
-  recorded once regardless of which side the rejection was actioned from)
+- `transaction_id_a` / `transaction_id_b` (the rejected pair, stored with
+  the smaller `id` always as `transaction_id_a`, so a pair is only ever
+  recorded once regardless of which side the rejection was actioned from.
+  This canonical ordering must be applied identically wherever the pair
+  is looked up, not just where it's stored — a query that checks a
+  candidate pair without first sorting the two candidate ids the same
+  way would silently miss an existing dismissal stored in the opposite
+  order and let a rejected pair resurface. The exclusion in step 5 below
+  applies this same ordering to whatever pair it's currently considering
+  before checking for a match.)
 - `dismissed_at`
 - `dismissed_by`
 
@@ -194,12 +201,43 @@ matching query in step 5 excludes a candidate pair if a
 `TransferMatchDismissal` already exists for it, but each transaction
 individually remains eligible against every other candidate.
 
+**Visibility and action permission**, since this (and `transfer_id`
+generally) is the first thing in this document to span two `Transaction`
+rows that can have different owners: the "common owner" matching rule
+only requires ownership overlap, not identical ownership, so a personal
+account of X can be matched against a joint account of X and Y. Y already
+sees the joint-account transaction (via `AccountOwnership`), but doesn't
+automatically see X's personal transaction under the core model's
+Visibility rule 1 unless it's independently shared. `transfer_id` and
+`TransferMatchDismissal` grant **no additional visibility** beyond what
+the core model's existing rules already establish — pairing or dismissing
+a match is not a new sharing mechanism. Concretely: Y can see that the
+joint transaction is linked to *some* transaction (`is_transfer = true`,
+`transfer_id` populated) without being able to resolve that transaction's
+own details if Y otherwise couldn't see it, and Y can neither see nor
+create a `TransferMatchDismissal` for a pair unless Y can already see
+both transactions in it (same principle as Visibility rule 3 requiring
+ownership/membership to *act*, not just to be affected). Confirming or
+rejecting a suggested match likewise requires being able to see both
+transactions in the pair.
+
 ### `Transaction` — three new fields (extends the core domain model)
-- `imported_id` (nullable) — SimpleFin's transaction ID. Used as the
-  upsert key so repeated syncs update existing rows instead of creating
-  duplicates. When an existing `imported_id` posts with a `pending`
-  transition from `true` to `false`, that's an ordinary field update
-  under the same upsert, same as any other reported change.
+- `imported_id` (nullable) — SimpleFin's transaction ID. The upsert key
+  is the **composite** `(account_id, imported_id)`, not `imported_id`
+  alone — the same scoping caveat already given to
+  `LinkedAccount.external_account_id` applies here for the identical
+  reason: the "joint-account double-import risk" and "bridge session
+  reset" open questions below both note that SimpleFin doesn't guarantee
+  identical `imported_id` values across different bridge sessions for
+  the same real transaction, which only bounds the *false-duplicate*
+  risk. Read literally, an unscoped `imported_id` upsert key would risk
+  the opposite failure too: two genuinely unrelated transactions on two
+  different accounts that happen to share an `imported_id` string would
+  silently merge into one `Transaction` row, potentially overwriting one
+  household member's transaction with another's. Scoping by `account_id`
+  closes that. When an existing `(account_id, imported_id)` posts with a
+  `pending` transition from `true` to `false`, that's an ordinary field
+  update under the same upsert, same as any other reported change.
 - `pending` (boolean, system-managed) — reflects SimpleFin's
   pending/posted state. Shown distinctly; can change (amount/date update)
   or the row can be deleted (cascading to its `BudgetAssignment` rows,
@@ -209,10 +247,11 @@ individually remains eligible against every other candidate.
   existing edit-invariant checks. If a deleted "vanished pending"
   transaction has a `transfer_id`, the deletion also clears (sets to
   `null`) `transfer_id` **and** resets `is_transfer` to `false` on the
-  transaction it was paired with — the pairing no longer has a real
-  counterpart to point at, and rather than leave a dangling reference or
-  guess whether the survivor is still a transfer at all, it drops back to
-  needing review, the same as an unpaired transaction would.
+  transaction it was paired with (subject to the Paired-row mutation rule
+  below) — the pairing no longer has a real counterpart to point at, and
+  rather than leave a dangling reference or guess whether the survivor is
+  still a transfer at all, it drops back to needing review, the same as
+  an unpaired transaction would.
 - `transfer_id` (nullable, self-referencing `Transaction.id`) — resolves
   the core doc's provisional note. `is_transfer` remains independently
   settable (e.g. a cash withdrawal with no corresponding linked account
@@ -225,6 +264,26 @@ individually remains eligible against every other candidate.
   field's value, but scoping the record to the pair (not the transaction)
   keeps either side eligible against a different, correct counterpart
   later.
+
+## Paired-row mutation rule
+
+This document has three separate operations that mutate `transfer_id`
+and/or `is_transfer` on **two** `Transaction` rows together: confirming a
+match (step 5), the amount-change reconciliation that un-pairs a
+confirmed match (step 5), and the vanished-pending cleanup that un-pairs
+a confirmed match whose counterpart got deleted (step 4). **All three
+must be implemented as a single atomic database transaction per
+operation, with each row's write conditioned on its current value
+matching what was read (compare-and-swap semantics) — never as two
+independent reads/writes,** even when only one of the three is called
+out explicitly below. This is stated once, here, as a general rule rather
+than repeated per-operation, precisely because treating it as a series of
+one-off fixes is what let earlier drafts of this document require it for
+confirmation but not for the other two — leaving an unconfirmed race
+where, for example, a confirmation and an in-flight reconciliation could
+each check a transaction's `transfer_id` before either write lands,
+recreating the same asymmetric-pairing bug this rule exists to prevent,
+regardless of which two operations are racing.
 
 ## Sync process
 
@@ -298,14 +357,8 @@ per that field's reset-path note above:
    the date window), the suggestion is discarded rather than confirmed,
    rather than overwriting an existing pairing or conflicting with the
    core model's `BudgetAssignment`/`is_transfer` mutual-exclusion rule.
-   This check-then-set must happen as **one atomic database transaction
-   covering both rows** — checking and writing each side with its own
-   separate conditional write is not sufficient, since side A's write
-   could succeed while side B's fails (already claimed by a concurrent
-   confirmation in the interim), leaving A pointing at B while B doesn't
-   point back — an asymmetric pairing, exactly the inconsistency this
-   requirement exists to prevent. Both rows must be checked and written
-   together, or neither is written at all. Once the check passes,
+   This check-then-set is subject to the Paired-row mutation rule above
+   (one atomic transaction covering both rows). Once the check passes,
    confirming sets `is_transfer = true` and `transfer_id` on both sides
    together. Once a transaction has any `BudgetAssignment`, it's
    implicitly "not a transfer" and drops out of matching against anyone;
@@ -318,9 +371,10 @@ per that field's reset-path note above:
    see `imported_id` above, applied during step 3), the pair no longer
    satisfies the "same absolute amount" condition it was confirmed under.
    The sync process clears `transfer_id` on both sides and resets
-   `is_transfer` to `false` on both, the same "drop back to needing
-   review" treatment used for a vanished-pending pair, rather than
-   leaving a pairing that no longer matches on the books.
+   `is_transfer` to `false` on both (subject to the Paired-row mutation
+   rule above), the same "drop back to needing review" treatment used for
+   a vanished-pending pair, rather than leaving a pairing that no longer
+   matches on the books.
 
 ## Open questions / explicit assumptions
 
