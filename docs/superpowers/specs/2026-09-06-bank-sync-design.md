@@ -83,11 +83,17 @@ Out of scope:
   re-auth before its first successful link could never be updated at all)
 - `status` (`ok` | `error` | `reauth_required`; defaults to `ok` on
   creation. A sync attempt that fails with an authentication error sets
-  it to `reauth_required`; any other sync failure sets it to `error`.
-  A successful `access_url` update (passing the overlap check above)
-  resets it to `ok`, as does any subsequently successful sync run —
-  nothing else clears it, so a connection can't get permanently stuck
-  excluded from sync after a genuine fix)
+  it to `reauth_required`; any other sync failure (e.g. transient
+  API/rate-limit error) sets it to `error`. A successful `access_url`
+  update (passing the overlap check above) or a successful sync run
+  resets it to `ok`. **`error` connections are still attempted on every
+  sync run — only `reauth_required` ones are excluded** (see the Sync
+  process gate below); otherwise a merely transient failure with a
+  perfectly valid credential would permanently strand the connection,
+  since nothing would ever attempt a sync that could reset it back to
+  `ok`. `reauth_required` connections are excluded because retrying
+  without a credential fix is pointless — they resume once `access_url`
+  is updated)
 - `created_at`
 - `last_synced_at` (nullable)
 - `deleted_at` (nullable — soft-delete, consistent with the core doc's
@@ -98,14 +104,23 @@ Out of scope:
 - `id`
 - `simplefin_connection_id`
 - `external_account_id` (SimpleFin's stable identifier for this bank
-  account)
+  account — stable, and unique, only *within* the connection that
+  reported it, not globally: step 2's "no `LinkedAccount` row yet" lookup
+  is keyed on `(simplefin_connection_id, external_account_id)` together.
+  This is why two different connections linking the same real joint
+  account produce two separate `LinkedAccount` rows with two different
+  `external_account_id`s in the first place — see the joint-account
+  double-import risk below.)
 - `external_org_name` / `external_display_name` (bank name and account
   nickname as reported by SimpleFin — shown to help the user pick which
   `Account` this maps to, not used in any logic)
 - `account_id` (nullable — **null means this SimpleFin-reported account
   hasn't been linked to one of the household's `Account` rows yet**; it
   sits in the connecting user's pending-link queue. No transactions
-  import for an external account until this is set.)
+  import for an external account until this is set. Must reference an
+  `Account` belonging to the connecting user's household — not
+  necessarily solely owned by them, since linking a joint account is
+  legitimate, but it must be a household account, not an arbitrary one.)
 - `linked_at` (nullable, set when `account_id` is set)
 
 Linking an account triggers a backfill sync for its available history.
@@ -171,7 +186,8 @@ tension between the two.
 
 Triggered on a schedule (proposing once or twice a day) and on-demand
 (user-initiated refresh). For each active (`deleted_at` null,
-`status = ok`) `SimpleFinConnection`:
+`status != reauth_required`) `SimpleFinConnection` — i.e. `ok` or `error`,
+per that field's reset-path note above:
 
 1. Call SimpleFin's accounts endpoint, get external accounts + their
    transactions since the last sync.
@@ -189,27 +205,45 @@ Triggered on a schedule (proposing once or twice a day) and on-demand
    the core model's convention that a soft-deleted row stops being a
    target for new rows. Its `SimpleFinConnection` keeps syncing other,
    still-active linked accounts normally.
-4. **Vanished pending transactions**: a transaction previously imported
-   as `pending`, whose own `date` falls within the last 14 days as of
-   this sync run, that's missing from the latest sync, is deleted as
-   canceled (also see the `transfer_id` cleanup this can trigger, noted
-   on that field above). Transactions whose `date` is older than that are
-   left alone even if still `pending`, to avoid misfiring on something
-   just outside a query's date range rather than genuinely canceled.
-5. **Transfer-match suggestion**: after import, a matching query looks
-   for candidate pairs among transactions with no `transfer_id`, no
-   `transfer_match_dismissed_at`, and no `BudgetAssignment` yet — on
-   **two different accounts** (excluding same-account pairs, e.g. a
-   purchase and its refund on the same card, which trivially "share a
-   common owner" with themselves but aren't a transfer between accounts
-   at all), same absolute amount, opposite sign, dates within ±3 days of
-   each other, and **both accounts sharing at least one common owner**
-   (matching the core model's own definition of `is_transfer` as money
-   moving "between the user's own accounts" — this is deliberately
-   narrower than "both accounts belonging to the household," which would
-   also match, say, one member e-transferring the other, a real payment
-   between two people, not a self-transfer). Matches are surfaced for
-   confirmation, never auto-committed.
+4. **Vanished pending transactions**: scoped only to transactions on
+   `LinkedAccount`s actually processed in step 3 (i.e. **excluding**
+   accounts skipped for a soft-deleted `Account`, or `LinkedAccount`s
+   that have since been unlinked) — this check is about "SimpleFin
+   stopped reporting a transaction we're actively syncing," not "we
+   didn't happen to look this run." Within that scope, a transaction
+   previously imported as `pending`, whose own `date` is not more than
+   14 days in the past as of this sync run (i.e. `date >= now - 14 days`
+   — this has no upper bound, so a future-dated or todays-dated pending
+   transaction is included, not left in limbo), that's missing from the
+   latest sync, is deleted as canceled (also see the `transfer_id`
+   cleanup this can trigger, noted on that field above). Transactions
+   dated more than 14 days in the past are left alone even if still
+   `pending`, to avoid misfiring on something just outside a query's
+   date range rather than genuinely canceled.
+5. **Transfer-match suggestion**: runs after steps 3 and 4 have fully
+   completed for this connection (so any pair whose `transfer_id` was
+   just cleared by the amount-change reconciliation below, or by step
+   4's vanished-pending cleanup, is already back to looking like an
+   ordinary unpaired transaction by the time this step's query runs, and
+   is eligible for a fresh match in the same run rather than waiting for
+   the next sync). A matching query looks for candidate pairs among
+   transactions with no `transfer_id`, no `transfer_match_dismissed_at`,
+   and no `BudgetAssignment` yet — on **two different accounts**
+   (excluding same-account pairs, e.g. a purchase and its refund on the
+   same card, which trivially "share a common owner" with themselves but
+   aren't a transfer between accounts at all), same absolute amount,
+   opposite sign, dates within ±3 days of each other, and **both accounts
+   sharing at least one common owner** (matching the core model's own
+   definition of `is_transfer` as money moving "between the user's own
+   accounts" — this is deliberately narrower than "both accounts
+   belonging to the household," which would also match, say, one member
+   e-transferring the other, a real payment between two people, not a
+   self-transfer). A transaction with `is_transfer` already manually set
+   `true` (e.g. a cash withdrawal, per the core doc's example) is still
+   an eligible candidate — pairing it doesn't change what it means, it
+   just adds a confirmed link if a real match turns up, and it's still
+   only ever committed on explicit confirmation, never silently. Matches
+   are surfaced for confirmation, never auto-committed.
 
    Confirming re-checks both transactions still have no `BudgetAssignment`
    **and no `transfer_id`** at that moment (not just when the suggestion
@@ -219,19 +253,25 @@ Triggered on a schedule (proposing once or twice a day) and on-demand
    the date window), the suggestion is discarded rather than confirmed,
    rather than overwriting an existing pairing or conflicting with the
    core model's `BudgetAssignment`/`is_transfer` mutual-exclusion rule.
-   Confirming sets `is_transfer = true` and `transfer_id` on both sides.
-   Once a transaction has any `BudgetAssignment`, it's implicitly "not a
-   transfer" and drops out of matching; explicitly rejecting a suggestion
-   sets `transfer_match_dismissed_at` to the same effect.
+   This check-then-set must happen atomically (e.g. a single conditional
+   write per transaction, not a separate read followed by a separate
+   write) — otherwise two overlapping suggestions confirmed at nearly the
+   same moment could both pass the check before either write lands,
+   letting one transaction end up claimed by two different pairs. Once
+   the check passes, confirming sets `is_transfer = true` and
+   `transfer_id` on both sides. Once a transaction has any
+   `BudgetAssignment`, it's implicitly "not a transfer" and drops out of
+   matching; explicitly rejecting a suggestion sets
+   `transfer_match_dismissed_at` to the same effect.
 
    If a transaction's `amount` changes after its transfer pair was
    confirmed (a `pending` transaction posting with a different amount —
-   see `imported_id` above), the pair no longer satisfies the
-   "same absolute amount" condition it was confirmed under. The sync
-   process clears `transfer_id` on both sides and resets `is_transfer` to
-   `false` on both, the same "drop back to needing review" treatment used
-   for a vanished-pending pair, rather than leaving a pairing that no
-   longer matches on the books.
+   see `imported_id` above, applied during step 3), the pair no longer
+   satisfies the "same absolute amount" condition it was confirmed under.
+   The sync process clears `transfer_id` on both sides and resets
+   `is_transfer` to `false` on both, the same "drop back to needing
+   review" treatment used for a vanished-pending pair, rather than
+   leaving a pairing that no longer matches on the books.
 
 ## Open questions / explicit assumptions
 
