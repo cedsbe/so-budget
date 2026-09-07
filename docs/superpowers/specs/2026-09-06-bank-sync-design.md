@@ -76,8 +76,18 @@ Out of scope:
   accounts overlap with this connection's existing
   `LinkedAccount.external_account_id`s; one that looks like an entirely
   different set of accounts is rejected rather than silently redirecting
-  future syncs to unrelated bank data)
-- `status` (`ok` | `error` | `reauth_required`)
+  future syncs to unrelated bank data. If this connection has zero
+  `LinkedAccount` rows yet — nothing has ever been linked, so there's no
+  existing set to compare against — the overlap check is skipped and the
+  update is accepted unconditionally; otherwise a connection that needed
+  re-auth before its first successful link could never be updated at all)
+- `status` (`ok` | `error` | `reauth_required`; defaults to `ok` on
+  creation. A sync attempt that fails with an authentication error sets
+  it to `reauth_required`; any other sync failure sets it to `error`.
+  A successful `access_url` update (passing the overlap check above)
+  resets it to `ok`, as does any subsequently successful sync run —
+  nothing else clears it, so a connection can't get permanently stuck
+  excluded from sync after a genuine fix)
 - `created_at`
 - `last_synced_at` (nullable)
 - `deleted_at` (nullable — soft-delete, consistent with the core doc's
@@ -108,7 +118,13 @@ value to another — re-pointing to a different `Account` means unlinking
 first, then linking fresh. This avoids silently reattaching a stream of
 future transactions to a different `Account` than the one already-imported
 history sits under, with no clear boundary between "old account's history"
-and "new account's history."
+and "new account's history." Clearing `account_id` doesn't touch
+`Transaction` rows already imported under it — they stay attached to
+their `Account`, untouched, exactly like transactions on a soft-deleted
+`Account` do. In particular, any that were still `pending` stay `pending`
+indefinitely, since sync no longer touches this `external_account_id`
+once unlinked; they'll only resume updating if the same external account
+is linked again later.
 
 Multiple `LinkedAccount` rows **may** reference the same `account_id` —
 this isn't prevented. That's a deliberate (if imperfect) choice: it's the
@@ -182,24 +198,40 @@ Triggered on a schedule (proposing once or twice a day) and on-demand
    just outside a query's date range rather than genuinely canceled.
 5. **Transfer-match suggestion**: after import, a matching query looks
    for candidate pairs among transactions with no `transfer_id`, no
-   `transfer_match_dismissed_at`, and no `BudgetAssignment` yet — same
-   absolute amount, opposite sign, dates within ±3 days of each other,
-   and **both accounts sharing at least one common owner** (matching the
-   core model's own definition of `is_transfer` as money moving "between
-   the user's own accounts" — this is deliberately narrower than "both
-   accounts belonging to the household," which would also match, say,
-   one member e-transferring the other, a real payment between two
-   people, not a self-transfer). Matches are surfaced for confirmation,
-   never auto-committed. Confirming re-checks both transactions still
-   have no `BudgetAssignment` at that moment (not just when the
-   suggestion was generated) — if either has since been assigned to a
-   budget, the suggestion is discarded rather than confirmed, since
-   confirming would otherwise conflict with the core model's rule that
-   `BudgetAssignment` and `is_transfer = true` are mutually exclusive.
+   `transfer_match_dismissed_at`, and no `BudgetAssignment` yet — on
+   **two different accounts** (excluding same-account pairs, e.g. a
+   purchase and its refund on the same card, which trivially "share a
+   common owner" with themselves but aren't a transfer between accounts
+   at all), same absolute amount, opposite sign, dates within ±3 days of
+   each other, and **both accounts sharing at least one common owner**
+   (matching the core model's own definition of `is_transfer` as money
+   moving "between the user's own accounts" — this is deliberately
+   narrower than "both accounts belonging to the household," which would
+   also match, say, one member e-transferring the other, a real payment
+   between two people, not a self-transfer). Matches are surfaced for
+   confirmation, never auto-committed.
+
+   Confirming re-checks both transactions still have no `BudgetAssignment`
+   **and no `transfer_id`** at that moment (not just when the suggestion
+   was generated) — if either condition no longer holds (assigned to a
+   budget, or already claimed by a different confirmed match, which can
+   happen when three or more transactions share the same amount within
+   the date window), the suggestion is discarded rather than confirmed,
+   rather than overwriting an existing pairing or conflicting with the
+   core model's `BudgetAssignment`/`is_transfer` mutual-exclusion rule.
    Confirming sets `is_transfer = true` and `transfer_id` on both sides.
    Once a transaction has any `BudgetAssignment`, it's implicitly "not a
    transfer" and drops out of matching; explicitly rejecting a suggestion
    sets `transfer_match_dismissed_at` to the same effect.
+
+   If a transaction's `amount` changes after its transfer pair was
+   confirmed (a `pending` transaction posting with a different amount —
+   see `imported_id` above), the pair no longer satisfies the
+   "same absolute amount" condition it was confirmed under. The sync
+   process clears `transfer_id` on both sides and resets `is_transfer` to
+   `false` on both, the same "drop back to needing review" treatment used
+   for a vanished-pending pair, rather than leaving a pairing that no
+   longer matches on the books.
 
 ## Open questions / explicit assumptions
 
@@ -237,5 +269,13 @@ Triggered on a schedule (proposing once or twice a day) and on-demand
 - **Sync frequency specifics** (exact schedule interval, backoff on
   errors, rate-limit handling) are implementation details deferred to
   the implementation plan, not a data-modeling concern.
+- **Stale old pending transactions have no cleanup path.** The vanished-
+  pending cancellation (see Sync process step 4) only reaps transactions
+  dated within the last 14 days; a `pending` transaction older than that,
+  if genuinely canceled by the bank, has no mechanism in this document
+  to ever detect or clean it up — it stays `pending` indefinitely. Known
+  limitation, not resolved here; a longer reconciliation window or a
+  periodic full-history re-check are possible future fixes, deliberately
+  not designed now.
 - **Institution coverage** — see the Provider decision section; not
   verified against this household's actual banks yet.
