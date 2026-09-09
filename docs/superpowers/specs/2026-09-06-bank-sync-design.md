@@ -247,11 +247,11 @@ transactions in the pair.
   existing edit-invariant checks. If a deleted "vanished pending"
   transaction has a `transfer_id`, the deletion also clears (sets to
   `null`) `transfer_id` **and** resets `is_transfer` to `false` on the
-  transaction it was paired with (subject to the Paired-row mutation rule
-  below) — the pairing no longer has a real counterpart to point at, and
-  rather than leave a dangling reference or guess whether the survivor is
-  still a transfer at all, it drops back to needing review, the same as
-  an unpaired transaction would.
+  transaction it was paired with (subject to the Transfer pair
+  consistency rule below) — the pairing no longer has a real counterpart
+  to point at, and rather than leave a dangling reference or guess
+  whether the survivor is still a transfer at all, it drops back to
+  needing review, the same as an unpaired transaction would.
 - `transfer_id` (nullable, self-referencing `Transaction.id`) — resolves
   the core doc's provisional note. `is_transfer` remains independently
   settable (e.g. a cash withdrawal with no corresponding linked account
@@ -265,25 +265,66 @@ transactions in the pair.
   keeps either side eligible against a different, correct counterpart
   later.
 
-## Paired-row mutation rule
+## Transfer pair consistency rule
 
-This document has three separate operations that mutate `transfer_id`
-and/or `is_transfer` on **two** `Transaction` rows together: confirming a
-match (step 5), the amount-change reconciliation that un-pairs a
-confirmed match (step 5), and the vanished-pending cleanup that un-pairs
-a confirmed match whose counterpart got deleted (step 4). **All three
-must be implemented as a single atomic database transaction per
-operation, with each row's write conditioned on its current value
-matching what was read (compare-and-swap semantics) — never as two
-independent reads/writes,** even when only one of the three is called
-out explicitly below. This is stated once, here, as a general rule rather
-than repeated per-operation, precisely because treating it as a series of
-one-off fixes is what let earlier drafts of this document require it for
-confirmation but not for the other two — leaving an unconfirmed race
-where, for example, a confirmation and an in-flight reconciliation could
-each check a transaction's `transfer_id` before either write lands,
-recreating the same asymmetric-pairing bug this rule exists to prevent,
-regardless of which two operations are racing.
+Whenever `transfer_id` is set on a transaction (a confirmed pair), this
+invariant must hold at all times: both sides' `transfer_id` point at each
+other, both have `is_transfer = true`, neither has a `BudgetAssignment`,
+and their amounts still satisfy the same-absolute-value match condition
+from step 5. This is stated as an **invariant**, not as a fixed list of
+operations that must respect it — an earlier draft of this document tried
+enumerating "the operations that touch both sides together" (confirming a
+match, amount-change reconciliation, vanished-pending cleanup) and
+required atomicity for exactly those three. That approach has a
+structural flaw beyond just being incomplete: the fields this invariant
+depends on — `amount`, `is_transfer`, `transfer_id`, and whether a
+`BudgetAssignment` exists — are *also* mutable through the core domain
+model's own general, single-row edit rules (a user can edit `amount`
+subject to its assignment-sum invariant, or toggle `is_transfer` "at any
+time" per that field's note), entirely independent of anything this
+document's sync logic does. Those general edits were never brought under
+the three-operation list, so a user manually editing the amount of a
+paired transaction, or manually setting `is_transfer = false` on one,
+could break the invariant above without triggering any of the
+cross-checks meant to protect it.
+
+**The rule, restated to actually close that gap:** any mutation —
+regardless of whether it originates from this document's sync process or
+from the core model's general Transaction-edit paths — that would leave
+the invariant above false for a transaction that currently has a
+`transfer_id` must instead atomically un-pair both sides (clear
+`transfer_id` on both, reset `is_transfer` to `false` on both) as part of
+that same mutation, rather than committing a change that leaves a broken
+pair on the books. Concretely, this covers at least:
+
+- Confirming a new match (the only operation that *creates* a pair — step
+  5)
+- Sync detecting a posted amount change that no longer matches (step 3)
+- **A user manually editing `amount` on a paired transaction** such that
+  it no longer matches its partner — the core model's edit-invariant
+  check (assignment-sum) still applies as normal, and *in addition*, if
+  the transaction has a `transfer_id`, this document's un-pairing applies
+  too
+- **A user manually setting `is_transfer = false`** on a transaction that
+  currently has a `transfer_id` — allowed (the core model doesn't forbid
+  it), but treated as "un-pair," not a bare field flip: the partner's
+  `transfer_id` is cleared and its `is_transfer` reset to `false` too,
+  the same as if the user had rejected the match themselves
+- Sync detecting a vanished pending counterpart (step 4)
+- Any other future mutation not listed here that changes a field this
+  invariant depends on, on either side of an existing pair
+
+Every one of these must be a **single atomic database transaction
+covering both rows**, with each row's write conditioned on the *current
+values of every field the invariant depends on* — not just `transfer_id`
+— matching what was read (compare-and-swap semantics). Checking only
+`transfer_id` is not sufficient: for example, a `BudgetAssignment`
+created on one side between the read and the write would itself need to
+be part of what invalidates the write, not just a change to `transfer_id`
+itself. This is stated once, here, precisely because treating it as a
+growing list of specific operations is what let three successive earlier
+drafts each cover one more operation while leaving the next one
+uncovered.
 
 ## Sync process
 
@@ -323,26 +364,38 @@ per that field's reset-path note above:
    dated more than 14 days in the past are left alone even if still
    `pending`, to avoid misfiring on something just outside a query's
    date range rather than genuinely canceled.
-5. **Transfer-match suggestion**: runs after steps 3 and 4 have fully
-   completed for this connection (so any pair whose `transfer_id` was
-   just cleared by the amount-change reconciliation below, or by step
+5. **Transfer-match suggestion**: triggered after steps 3 and 4 have
+   fully completed for this connection (so any pair whose `transfer_id`
+   was just cleared by the amount-change reconciliation below, or by step
    4's vanished-pending cleanup, is already back to looking like an
    ordinary unpaired transaction by the time this step's query runs, and
    is eligible for a fresh match in the same run rather than waiting for
    the next sync). A matching query looks for candidate pairs among
    transactions with no `transfer_id` and no `BudgetAssignment` yet,
    excluding any specific pair that already has a `TransferMatchDismissal`
-   — on **two different accounts**
-   (excluding same-account pairs, e.g. a purchase and its refund on the
-   same card, which trivially "share a common owner" with themselves but
-   aren't a transfer between accounts at all), same absolute amount,
-   opposite sign, dates within ±3 days of each other, and **both accounts
-   sharing at least one common owner** (matching the core model's own
-   definition of `is_transfer` as money moving "between the user's own
-   accounts" — this is deliberately narrower than "both accounts
-   belonging to the household," which would also match, say, one member
-   e-transferring the other, a real payment between two people, not a
-   self-transfer). A transaction with `is_transfer` already manually set
+   — on **two different accounts** (excluding same-account pairs, e.g. a
+   purchase and its refund on the same card, which trivially "share a
+   common owner" with themselves but aren't a transfer between accounts
+   at all), same absolute amount, opposite sign, dates within ±3 days of
+   each other, and **both accounts sharing at least one common owner**
+   (matching the core model's own definition of `is_transfer` as money
+   moving "between the user's own accounts" — this is deliberately
+   narrower than "both accounts belonging to the household," which would
+   also match, say, one member e-transferring the other, a real payment
+   between two people, not a self-transfer).
+
+   **The query itself is not scoped to "this connection"** — it looks
+   across every `Transaction` the querying context can see, regardless of
+   which connection (or manual entry) produced it. "Triggered after this
+   connection's sync" is just when it runs, not a filter on what it
+   considers; when multiple connections sync in the same cycle, this step
+   effectively re-runs the same global query once per connection. That's
+   harmless — already-paired or already-dismissed candidates are
+   excluded, so repeating it is idempotent — but is a byproduct of using
+   "a connection finished syncing" as the trigger, not a sign the
+   matching is connection-scoped.
+
+   A transaction with `is_transfer` already manually set
    `true` (e.g. a cash withdrawal, per the core doc's example) is still
    an eligible candidate — pairing it doesn't change what it means, it
    just adds a confirmed link if a real match turns up, and it's still
@@ -357,10 +410,10 @@ per that field's reset-path note above:
    the date window), the suggestion is discarded rather than confirmed,
    rather than overwriting an existing pairing or conflicting with the
    core model's `BudgetAssignment`/`is_transfer` mutual-exclusion rule.
-   This check-then-set is subject to the Paired-row mutation rule above
-   (one atomic transaction covering both rows). Once the check passes,
-   confirming sets `is_transfer = true` and `transfer_id` on both sides
-   together. Once a transaction has any `BudgetAssignment`, it's
+   This check-then-set is subject to the Transfer pair consistency rule
+   above (one atomic transaction covering both rows). Once the check
+   passes, confirming sets `is_transfer = true` and `transfer_id` on both
+   sides together. Once a transaction has any `BudgetAssignment`, it's
    implicitly "not a transfer" and drops out of matching against anyone;
    explicitly rejecting a suggestion instead records a
    `TransferMatchDismissal` for that pair only, leaving both transactions
