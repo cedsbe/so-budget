@@ -41,6 +41,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		scheduleBackups(st, cfg.BackupDir, cfg.BackupInterval, cfg.BackupKeep)
 		log.Printf("listening on %s", cfg.Listen)
 		log.Fatal(http.ListenAndServe(cfg.Listen, srv.Handler()))
 	case "invite":
@@ -78,8 +79,27 @@ func bankClient(cfg config.Config) simplefin.Client {
 	return simplefin.NewHTTPClient()
 }
 
-// backup is implemented in Task 17.
-func backup(st *store.Store, dest string) error { _ = time.Now; return fmt.Errorf("backup not implemented") }
+func backup(st *store.Store, dest string) error {
+	return st.BackupTo(context.Background(), dest)
+}
+
+// scheduleBackups runs a backup every interval into dir and prunes old files.
+func scheduleBackups(st *store.Store, dir string, interval time.Duration, keep int) {
+	if dir == "" {
+		return
+	}
+	go func() {
+		for {
+			name := filepath.Join(dir, "so-budget-"+time.Now().UTC().Format("20060102-1504")+".db")
+			if err := st.BackupTo(context.Background(), name); err != nil {
+				log.Printf("backup failed: %v", err)
+			} else if err := store.PruneBackups(dir, keep); err != nil {
+				log.Printf("prune failed: %v", err)
+			}
+			time.Sleep(interval)
+		}
+	}()
+}
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: so-budget <serve|invite NAME|backup DEST>")

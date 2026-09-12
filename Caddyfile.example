@@ -1,0 +1,3 @@
+budget.example.com {
+	reverse_proxy so-budget:8080
+}

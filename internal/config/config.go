@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -16,6 +17,9 @@ type Config struct {
 	IdleTimeout     time.Duration
 	AbsoluteTimeout time.Duration
 	Location        *time.Location
+	BackupDir       string
+	BackupInterval  time.Duration
+	BackupKeep      int
 }
 
 func FromEnv() (Config, error) {
@@ -27,6 +31,9 @@ func FromEnv() (Config, error) {
 		Dev:             os.Getenv("SB_DEV") == "1",
 		IdleTimeout:     duration("SB_IDLE_TIMEOUT", 30*time.Minute),
 		AbsoluteTimeout: duration("SB_ABS_TIMEOUT", 12*time.Hour),
+		BackupDir:       os.Getenv("SB_BACKUP_DIR"),
+		BackupInterval:  duration("SB_BACKUP_INTERVAL", 24*time.Hour),
+		BackupKeep:      intEnv("SB_BACKUP_KEEP", 14),
 	}
 	loc, err := time.LoadLocation(getenv("SB_TZ", "America/Toronto"))
 	if err != nil {
@@ -53,6 +60,15 @@ func duration(k string, def time.Duration) time.Duration {
 	if v := os.Getenv(k); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			return d
+		}
+	}
+	return def
+}
+
+func intEnv(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
 		}
 	}
 	return def
