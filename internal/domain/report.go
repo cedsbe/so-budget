@@ -37,17 +37,19 @@ func ComputeMonth(m Month, today time.Time, users []User, contribs map[int64]Cen
 	r.Closed = !m.End().After(todayDate)
 
 	matched := map[int64]Cents{}
+	hasMatch := map[int64]bool{}
 	spentBy := map[int64]Cents{}
 	for _, e := range entries {
 		spentBy[e.PayerID] += e.Amount
 		r.Spent += e.Amount
 		if e.PlannedID != 0 {
 			matched[e.PlannedID] += e.Amount
+			hasMatch[e.PlannedID] = true
 		}
 	}
 	unmatchedBy := map[int64]Cents{}
 	for _, p := range planned {
-		st := PlannedStatus{Planned: p, Matched: matched[p.ID], Occurred: matched[p.ID] != 0}
+		st := PlannedStatus{Planned: p, Matched: matched[p.ID], Occurred: hasMatch[p.ID]}
 		if !st.Occurred && !r.Closed {
 			unmatchedBy[p.PayerID] += p.Amount
 			r.PlannedUnmatched += p.Amount
