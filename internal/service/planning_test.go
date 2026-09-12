@@ -16,8 +16,8 @@ func TestPlanningMatchingAndGhosts(t *testing.T) {
 	a := LoginTestUser(t, svc, "alice")
 	rent, _ := svc.AddCategory(ctx, "Rent")
 	gym, _ := svc.AddCategory(ctx, "Gym")
-	rentID, _ := svc.AddPlanned(ctx, domain.PlannedExpense{Name: "Rent", Amount: 185000, CategoryID: rent, PayerID: a.UserID, Day: 1, Recurring: true, Active: true})
-	gymID, _ := svc.AddPlanned(ctx, domain.PlannedExpense{Name: "Gym", Amount: 4000, CategoryID: gym, PayerID: a.UserID, Day: 15, Recurring: true, Active: true})
+	rentID, _ := svc.AddPlanned(ctx, domain.PlannedExpense{Name: "Rent", Amount: 185000, CategoryID: rent, PayerID: a.UserID, Day: 1, Recurring: true, Active: true, CreatedAt: "2026-06-01"})
+	gymID, _ := svc.AddPlanned(ctx, domain.PlannedExpense{Name: "Gym", Amount: 4000, CategoryID: gym, PayerID: a.UserID, Day: 15, Recurring: true, Active: true, CreatedAt: "2026-06-01"})
 
 	sep := domain.Month{Year: 2026, Mon: time.September}
 	id, _ := svc.AddManualEntry(ctx, domain.HouseholdEntry{PayerID: a.UserID, Date: sep.Start(), Amount: 185000, CategoryID: rent})
@@ -65,6 +65,21 @@ func TestPlanningMatchingAndGhosts(t *testing.T) {
 	planned, _ := svc.PlannedForMonth(ctx, sep)
 	if len(planned) != 2 {
 		t.Fatalf("planned for month %d", len(planned))
+	}
+
+	// A plan created "now" (fixedNow, 2026-09-11) did not exist in the closed
+	// months, so it must never show as a ghost on day one.
+	freshID, _ := svc.AddPlanned(ctx, domain.PlannedExpense{Name: "Streaming", Amount: 1500, CategoryID: gym, PayerID: a.UserID, Day: 5, Recurring: true, Active: true})
+	views, err = svc.PlannedExpenses(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName = map[string]PlannedView{}
+	for _, v := range views {
+		byName[v.Name] = v
+	}
+	if byName["Streaming"].MissedMonths != 0 || byName["Streaming"].ID != freshID {
+		t.Fatalf("fresh plan should not be a ghost: %+v", byName["Streaming"])
 	}
 }
 

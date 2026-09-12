@@ -13,7 +13,7 @@ func TestPlannedAndContributions(t *testing.T) {
 	ctx := context.Background()
 	u := newUser(t, s, "a")
 	cat, _ := s.CreateCategory(ctx, "Rent")
-	id, err := s.CreatePlanned(ctx, domain.PlannedExpense{Name: "Rent", Amount: 185000, CategoryID: cat, PayerID: u, Day: 1, Recurring: true, Active: true})
+	id, err := s.CreatePlanned(ctx, domain.PlannedExpense{Name: "Rent", Amount: 185000, CategoryID: cat, PayerID: u, Day: 1, Recurring: true, Active: true, CreatedAt: "2026-01-01"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +24,14 @@ func TestPlannedAndContributions(t *testing.T) {
 		t.Fatalf("all=%d active=%d", len(all), len(active))
 	}
 	p, _ := s.Planned(ctx, id)
+	if p.CreatedAt != "2026-01-01" {
+		t.Fatalf("created_at round-trip: %q", p.CreatedAt)
+	}
+	for _, row := range all {
+		if row.Name == "Old" && row.CreatedAt != "" {
+			t.Fatalf("plan created without an explicit CreatedAt should scan empty, got %q", row.CreatedAt)
+		}
+	}
 	p.Amount = 190000
 	p.SingleMonth = "2026-12"
 	p.Recurring = false

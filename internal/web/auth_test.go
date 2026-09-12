@@ -143,6 +143,29 @@ func TestSessionIdleExpiry(t *testing.T) {
 	}
 }
 
+// TestLoginThrottled fires bad logins until the shared sliding-window limiter
+// (10/minute across /login and /recover) kicks in and returns 429.
+func TestLoginThrottled(t *testing.T) {
+	a := newTestApp(t)
+	a.activateUser(t, "alice")
+
+	for i := 0; i < 10; i++ {
+		resp, _ := a.client.PostForm(a.srv.URL+"/login", url.Values{"name": {"alice"}, "password": {"wrong"}})
+		body := readBody(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("attempt %d: status %d: %s", i, resp.StatusCode, body)
+		}
+	}
+	resp, _ := a.client.PostForm(a.srv.URL+"/login", url.Values{"name": {"alice"}, "password": {"wrong"}})
+	body := readBody(resp)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("11th attempt should be throttled, got %d: %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "Too many attempts") {
+		t.Fatalf("expected throttle message: %s", body)
+	}
+}
+
 func readBody(resp *http.Response) string {
 	defer resp.Body.Close()
 	var sb strings.Builder

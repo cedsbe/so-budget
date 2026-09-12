@@ -15,7 +15,13 @@ type PlannedView struct {
 	MissedMonths int
 }
 
+// AddPlanned creates a planned expense, stamping CreatedAt from the service's clock
+// when the caller didn't already set one (tests may set it explicitly to control
+// the ghost-detection window).
 func (s *Service) AddPlanned(ctx context.Context, p domain.PlannedExpense) (int64, error) {
+	if p.CreatedAt == "" {
+		p.CreatedAt = s.now().UTC().Format("2006-01-02")
+	}
 	return s.store.CreatePlanned(ctx, p)
 }
 
@@ -121,7 +127,7 @@ func (s *Service) PlannedExpenses(ctx context.Context) ([]PlannedView, error) {
 	for _, p := range all {
 		v := PlannedView{PlannedExpense: p, Category: cats[p.CategoryID], Payer: names[p.PayerID]}
 		for _, m := range closed {
-			if p.AppliesTo(m) && !matched[m][p.ID] {
+			if p.AppliesTo(m) && !matched[m][p.ID] && p.ExistedBy(m) {
 				v.MissedMonths++
 			}
 		}

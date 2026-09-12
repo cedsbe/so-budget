@@ -26,8 +26,8 @@ func TestOpenAppliesMigrationsIdempotently(t *testing.T) {
 	}
 	var applied int
 	s.q.QueryRowContext(context.Background(), `SELECT count(*) FROM schema_migrations`).Scan(&applied)
-	if applied != 1 {
-		t.Fatalf("want 1 applied migration, got %d", applied)
+	if applied != 2 {
+		t.Fatalf("want 2 applied migrations, got %d", applied)
 	}
 }
 

@@ -42,7 +42,7 @@ func (s *Server) importPreview(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "import.html", importData{Error: err.Error()})
 		return
 	}
-	s.session(r).Import = &p
+	s.session(r).SetImport(&p)
 	users, _ := s.svc.Users(r.Context())
 	cats, _ := s.svc.Categories(r.Context(), false)
 	s.render(w, r, "import.html", importData{Preview: &p, Users: users, Categories: cats})
@@ -50,7 +50,7 @@ func (s *Server) importPreview(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) importCommit(w http.ResponseWriter, r *http.Request) {
 	sess := s.session(r)
-	p, _ := sess.Import.(*service.ImportPreview)
+	p, _ := sess.Import().(*service.ImportPreview)
 	if p == nil {
 		s.render(w, r, "import.html", importData{Error: "Nothing to import; upload a file first."})
 		return
@@ -75,7 +75,7 @@ func (s *Server) importCommit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, r, "import.html", importData{Preview: p, Users: users, Categories: cats, Error: err.Error()})
 		return
 	}
-	sess.Import = nil
+	sess.SetImport(nil)
 	s.flash(r, strconv.Itoa(n)+" entries imported.")
 	http.Redirect(w, r, "/ledger", http.StatusSeeOther)
 }

@@ -23,6 +23,7 @@ func (s *Server) routesInbox() {
 	s.private("POST /tx/{hash}/rule/private", s.txRulePrivate)
 	s.private("POST /tx/{hash}/rule/household", s.txRuleHousehold)
 	s.private("GET /history", s.history)
+	s.private("POST /history", s.historySearch)
 	s.private("GET /settings", s.settings)
 	s.private("POST /settings/link", s.settingsLink)
 	s.private("POST /settings/start", s.settingsStart)
@@ -38,20 +39,19 @@ const syncInterval = time.Hour
 
 // maybeSync runs a sync for the session if it is linked and the last one is older than syncInterval.
 func (s *Server) maybeSync(r *http.Request, sess *Session) bool {
-	if time.Since(sess.LastSync) < syncInterval {
+	if !sess.ShouldSync(syncInterval) {
 		return false
 	}
 	linked, err := s.svc.Linked(r.Context(), sess.P)
 	if err != nil || !linked {
 		return false
 	}
-	sess.LastSync = time.Now()
 	res, err := s.svc.Sync(r.Context(), sess.P)
 	if err != nil {
-		sess.SyncErrors = []string{"Sync failed: " + err.Error()}
+		sess.SetSyncErrors([]string{"Sync failed: " + err.Error()})
 		return true
 	}
-	sess.SyncErrors = res.Errors
+	sess.SetSyncErrors(res.Errors)
 	return true
 }
 
@@ -86,7 +86,7 @@ func (s *Server) inbox(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	s.render(w, r, "inbox.html", inboxData{Inbox: inbox, Categories: cats, SyncErrors: sess.SyncErrors})
+	s.render(w, r, "inbox.html", inboxData{Inbox: inbox, Categories: cats, SyncErrors: sess.SyncErrors()})
 }
 
 func (s *Server) syncNow(w http.ResponseWriter, r *http.Request) {
@@ -243,11 +243,25 @@ func monthParam(r *http.Request) domain.Month {
 	return domain.MonthOf(time.Now())
 }
 
+// history serves GET /history?month= for plain navigation (no query text lands here).
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	s.renderHistory(w, r, monthParam(r), r.URL.Query().Get("q"))
+}
+
+// historySearch serves POST /history so a payee search term never lands in a URL
+// (proxy logs, browser history), reading month and q from the form body instead.
+func (s *Server) historySearch(w http.ResponseWriter, r *http.Request) {
+	m, err := domain.ParseMonth(r.FormValue("month"))
+	if err != nil {
+		m = domain.MonthOf(time.Now())
+	}
+	s.renderHistory(w, r, m, r.FormValue("q"))
+}
+
+func (s *Server) renderHistory(w http.ResponseWriter, r *http.Request, m domain.Month, q string) {
 	sess := s.session(r)
 	s.maybeSync(r, sess)
-	m := monthParam(r)
-	items, err := s.svc.History(r.Context(), sess.P, m, r.URL.Query().Get("q"))
+	items, err := s.svc.History(r.Context(), sess.P, m, q)
 	if err != nil {
 		httpError(w, err)
 		return
@@ -257,7 +271,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	for _, c := range cats {
 		names[c.ID] = c.Name
 	}
-	s.render(w, r, "history.html", historyData{Month: m, Query: r.URL.Query().Get("q"), Items: items, Categories: cats, CatNames: names})
+	s.render(w, r, "history.html", historyData{Month: m, Query: q, Items: items, Categories: cats, CatNames: names})
 }
 
 type settingsData struct {
@@ -303,7 +317,7 @@ func (s *Server) settingsLink(w http.ResponseWriter, r *http.Request) {
 		s.renderSettings(w, r, "Could not link: "+err.Error())
 		return
 	}
-	sess.LastSync = time.Now()
+	sess.MarkSynced()
 	s.flash(r, "Bank linked and first sync done.")
 	http.Redirect(w, r, "/settings", http.StatusSeeOther)
 }

@@ -15,8 +15,8 @@ func TestEvaluatePrecedence(t *testing.T) {
 	}{
 		{"SOBEYS #1234 TORONTO", Suggestion{CategoryID: 10, Household: true}},
 		{"SOBEYS PHARMACY 77", Suggestion{CategoryID: 20, Household: false}}, // longest wins
-		{"NETFLIX.COM", Suggestion{Dismiss: true}},                             // private beats household
-		{"PAYMENT - THANK YOU", Suggestion{Dismiss: true}},                     // built-in card payment
+		{"NETFLIX.COM", Suggestion{Dismiss: true}},                           // private beats household
+		{"PAYMENT - THANK YOU", Suggestion{Dismiss: true}},                   // built-in card payment
 		{"UNKNOWN SHOP", Suggestion{}},
 	}
 	for _, c := range cases {

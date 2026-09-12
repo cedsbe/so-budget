@@ -3,9 +3,45 @@ package web
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/cedsbe/so-budget/internal/service"
 )
+
+// authAttemptsPerMinute caps the combined number of /login and /recover
+// submissions accepted in any rolling minute; each accepted attempt still runs
+// an expensive Argon2 derivation, so this bounds worst-case CPU cost.
+const authAttemptsPerMinute = 10
+
+// allowAuthAttempt enforces the sliding-window limit above, shared by /login and
+// /recover. It returns false (without recording the attempt) once the window is full.
+func (s *Server) allowAuthAttempt() bool {
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	kept := s.authLog[:0]
+	for _, t := range s.authLog {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	s.authLog = kept
+	if len(s.authLog) >= authAttemptsPerMinute {
+		return false
+	}
+	s.authLog = append(s.authLog, now)
+	return true
+}
+
+// withKDF runs fn while holding a slot in the KDF semaphore, capping how many
+// Argon2 derivations (from /login and /recover) can run at once. It blocks
+// rather than rejecting when the cap is reached.
+func (s *Server) withKDF(fn func()) {
+	s.kdfSem <- struct{}{}
+	defer func() { <-s.kdfSem }()
+	fn()
+}
 
 type loginData struct{ Error string }
 
@@ -14,7 +50,15 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
-	p, err := s.svc.Login(r.Context(), r.FormValue("name"), r.FormValue("password"))
+	if !s.allowAuthAttempt() {
+		s.renderStatus(w, r, "login.html", loginData{Error: "Too many attempts, try again in a minute."}, http.StatusTooManyRequests)
+		return
+	}
+	var p service.Principal
+	var err error
+	s.withKDF(func() {
+		p, err = s.svc.Login(r.Context(), r.FormValue("name"), r.FormValue("password"))
+	})
 	if errors.Is(err, service.ErrInvalidCredentials) {
 		s.render(w, r, "login.html", loginData{Error: "Invalid name or password."})
 		return
@@ -23,7 +67,11 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
-	sess := s.sessions.Create(p)
+	sess, err := s.sessions.Create(p)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
 	s.setCookie(w, sess.ID)
 	s.afterLogin(r, sess) // Task 12 makes this run the first sync.
 	http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -84,7 +132,15 @@ func (s *Server) recoverPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) recoverSubmit(w http.ResponseWriter, r *http.Request) {
-	code, err := s.svc.Recover(r.Context(), r.FormValue("name"), r.FormValue("code"), r.FormValue("password"))
+	if !s.allowAuthAttempt() {
+		s.renderStatus(w, r, "recovery.html", recoverData{Error: "Too many attempts, try again in a minute."}, http.StatusTooManyRequests)
+		return
+	}
+	var code string
+	var err error
+	s.withKDF(func() {
+		code, err = s.svc.Recover(r.Context(), r.FormValue("name"), r.FormValue("code"), r.FormValue("password"))
+	})
 	if errors.Is(err, service.ErrInvalidCredentials) || errors.Is(err, service.ErrWeakPassword) {
 		s.render(w, r, "recovery.html", recoverData{Error: err.Error()})
 		return

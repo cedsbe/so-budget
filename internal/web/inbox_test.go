@@ -82,7 +82,7 @@ func TestInboxLinkFlagAndThrottle(t *testing.T) {
 	for _, c := range a.client.Jar.Cookies(u) {
 		if c.Name == "sb_session" {
 			sess, _ := a.server.sessions.Get(c.Value)
-			sess.LastSync = time.Now().Add(-2 * time.Hour)
+			sess.ForceStale()
 		}
 	}
 	resp, _ = a.client.Get(a.srv.URL + "/")
@@ -113,11 +113,18 @@ func TestInboxLinkFlagAndThrottle(t *testing.T) {
 		t.Fatalf("ledger %+v", entries)
 	}
 
-	// History shows both, one flagged.
-	resp, _ = a.client.Get(a.srv.URL + "/history")
+	// History shows both, one flagged. The search form is POST so a payee query
+	// never lands in a URL (proxy logs, browser history).
+	resp, _ = a.client.PostForm(a.srv.URL+"/history", url.Values{"csrf": {csrf}, "month": {domain.MonthOf(time.Now()).String()}})
 	body = readBody(resp)
 	if !strings.Contains(body, "SOBEYS") || !strings.Contains(body, "TIM HORTONS") || !strings.Contains(body, "flagged") {
 		t.Fatalf("history: %s", body)
+	}
+	// Searching via POST narrows results.
+	resp, _ = a.client.PostForm(a.srv.URL+"/history", url.Values{"csrf": {csrf}, "month": {domain.MonthOf(time.Now()).String()}, "q": {"SOBEYS"}})
+	body = readBody(resp)
+	if !strings.Contains(body, "SOBEYS") || strings.Contains(body, "TIM HORTONS") {
+		t.Fatalf("history search: %s", body)
 	}
 
 	// Rule from transaction: always dismiss TIM HORTONS.

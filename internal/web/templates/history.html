@@ -1,6 +1,7 @@
 {{define "content"}}
 <h1>Private history</h1>
-<form method="get" action="/history" class="row card">
+<form method="post" action="/history" class="row card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
   <label>Month <input type="month" name="month" value="{{month .Data.Month}}"></label>
   <label>Search <input name="q" value="{{.Data.Query}}" placeholder="payee"></label>
   <button>Show</button>
@@ -22,6 +23,7 @@
       <form method="post" action="/tx/{{.IDHash}}/restore" class="inline"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="small">Back to inbox</button></form>
     {{else if eq .Tx.State "flagged"}}
       <details><summary class="small">edit</summary>
+        {{if .Entry}}
         <form method="post" action="/tx/{{.IDHash}}/edit" class="row">
           <input type="hidden" name="csrf" value="{{$csrf}}">
           <select name="category">{{$sel := .Entry.CategoryID}}{{range $cats}}<option value="{{.ID}}" {{if eq .ID $sel}}selected{{end}}>{{.Name}}</option>{{end}}</select>
@@ -29,6 +31,7 @@
           <input name="note" value="{{.Entry.Note}}" placeholder="note">
           <button class="small">Save</button>
         </form>
+        {{end}}
         <form method="post" action="/tx/{{.IDHash}}/unflag" class="inline"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="small danger">Unflag</button></form>
       </details>
     {{else}}

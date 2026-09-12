@@ -2,7 +2,9 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/subtle"
 	"embed"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cedsbe/so-budget/internal/domain"
@@ -36,6 +39,10 @@ type Server struct {
 	sessions *SessionStore
 	pages    map[string]*template.Template
 	mux      *http.ServeMux
+
+	kdfSem  chan struct{} // caps concurrent Argon2 derivations from /login and /recover
+	authMu  sync.Mutex
+	authLog []time.Time // sliding one-minute window of auth attempts, shared by /login and /recover
 }
 
 type ctxKey int
@@ -70,7 +77,7 @@ var funcs = template.FuncMap{
 }
 
 func New(svc *service.Service, cfg Config) (*Server, error) {
-	s := &Server{svc: svc, cfg: cfg, sessions: NewSessionStore(cfg.IdleTimeout, cfg.AbsoluteTimeout), pages: map[string]*template.Template{}}
+	s := &Server{svc: svc, cfg: cfg, sessions: NewSessionStore(cfg.IdleTimeout, cfg.AbsoluteTimeout), pages: map[string]*template.Template{}, kdfSem: make(chan struct{}, 2)}
 	entries, err := fs.ReadDir(templateFS, "templates")
 	if err != nil {
 		return nil, err
@@ -141,7 +148,7 @@ func (s *Server) checkCSRF(next http.Handler) http.Handler {
 			if tok == "" {
 				tok = r.FormValue("csrf")
 			}
-			if sess == nil || tok == "" || tok != sess.CSRF {
+			if sess == nil || tok == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(sess.CSRF)) != 1 {
 				http.Error(w, "invalid CSRF token", http.StatusForbidden)
 				return
 			}
@@ -172,8 +179,15 @@ type page struct {
 	Data  any
 }
 
-// render executes a page template inside the layout. The session, if any, supplies user, CSRF and flash.
+// render executes a page template inside the layout with a 200 status. The
+// session, if any, supplies user, CSRF and flash.
 func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, data any) {
+	s.renderStatus(w, r, name, data, http.StatusOK)
+}
+
+// renderStatus is like render but lets the caller pick the response status
+// (e.g. 429 for a rate-limited login page).
+func (s *Server) renderStatus(w http.ResponseWriter, r *http.Request, name string, data any, status int) {
 	t, ok := s.pages[name]
 	if !ok {
 		http.Error(w, "missing template "+name, http.StatusInternalServerError)
@@ -183,12 +197,17 @@ func (s *Server) render(w http.ResponseWriter, r *http.Request, name string, dat
 	if sess := s.session(r); sess != nil {
 		p.User = &domain.User{ID: sess.P.UserID, Name: sess.P.Name}
 		p.CSRF = sess.CSRF
-		p.Flash, sess.Flash = sess.Flash, ""
+		p.Flash = sess.TakeFlash()
+	}
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, "layout.html", p); err != nil {
+		log.Printf("render %s: %v", name, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := t.ExecuteTemplate(w, "layout.html", p); err != nil {
-		log.Printf("render %s: %v", name, err)
-	}
+	w.WriteHeader(status)
+	buf.WriteTo(w)
 }
 
 // renderPartial executes a named block without the layout (for htmx swaps).
@@ -198,20 +217,24 @@ func (s *Server) renderPartial(w http.ResponseWriter, r *http.Request, file, blo
 		http.Error(w, "missing template "+file, http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	p := page{Data: data}
 	if sess := s.session(r); sess != nil {
 		p.CSRF = sess.CSRF
 		p.User = &domain.User{ID: sess.P.UserID, Name: sess.P.Name}
 	}
-	if err := t.ExecuteTemplate(w, block, p); err != nil {
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, block, p); err != nil {
 		log.Printf("render %s#%s: %v", file, block, err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	buf.WriteTo(w)
 }
 
 func (s *Server) flash(r *http.Request, msg string) {
 	if sess := s.session(r); sess != nil {
-		sess.Flash = msg
+		sess.SetFlash(msg)
 	}
 }
 

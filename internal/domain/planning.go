@@ -1,5 +1,7 @@
 package domain
 
+import "time"
+
 // PlannedExpense is an expected household expense. Amount is positive.
 type PlannedExpense struct {
 	ID          int64
@@ -11,10 +13,25 @@ type PlannedExpense struct {
 	Recurring   bool   // every month
 	SingleMonth string // "YYYY-MM" when not recurring
 	Active      bool
+	CreatedAt   string // "YYYY-MM-DD"; may be empty for rows predating this field
 }
 
 func (p PlannedExpense) AppliesTo(m Month) bool {
 	return p.Active && (p.Recurring || p.SingleMonth == m.String())
+}
+
+// ExistedBy reports whether the plan already existed by month m, i.e. it was
+// created during or before m. An empty CreatedAt (legacy rows predating the
+// created_at column) is treated as "always existed" to preserve old behaviour.
+func (p PlannedExpense) ExistedBy(m Month) bool {
+	if p.CreatedAt == "" {
+		return true
+	}
+	t, err := time.Parse("2006-01-02", p.CreatedAt)
+	if err != nil {
+		return true
+	}
+	return !m.Before(MonthOf(t))
 }
 
 type Contribution struct {

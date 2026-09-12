@@ -8,20 +8,23 @@ import (
 	"github.com/cedsbe/so-budget/internal/domain"
 )
 
-const plannedCols = `id, name, amount, category_id, payer_user_id, day_of_month, recurring, COALESCE(single_month,''), active`
+const plannedCols = `id, name, amount, category_id, payer_user_id, day_of_month, recurring, COALESCE(single_month,''), active, COALESCE(created_at,'')`
 
 func scanPlanned(sc interface{ Scan(...any) error }) (domain.PlannedExpense, error) {
 	var p domain.PlannedExpense
-	err := sc.Scan(&p.ID, &p.Name, &p.Amount, &p.CategoryID, &p.PayerID, &p.Day, &p.Recurring, &p.SingleMonth, &p.Active)
+	err := sc.Scan(&p.ID, &p.Name, &p.Amount, &p.CategoryID, &p.PayerID, &p.Day, &p.Recurring, &p.SingleMonth, &p.Active, &p.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return p, ErrNotFound
 	}
 	return p, err
 }
 
+// CreatePlanned inserts p as given, including CreatedAt: the service is responsible
+// for stamping CreatedAt from its clock before calling this when the caller didn't
+// already set one, so the store never touches the wall clock itself.
 func (s *Store) CreatePlanned(ctx context.Context, p domain.PlannedExpense) (int64, error) {
-	res, err := s.q.ExecContext(ctx, `INSERT INTO planned_expenses(name, amount, category_id, payer_user_id, day_of_month, recurring, single_month, active)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, p.Name, p.Amount, p.CategoryID, p.PayerID, p.Day, p.Recurring, nullStr(p.SingleMonth), p.Active)
+	res, err := s.q.ExecContext(ctx, `INSERT INTO planned_expenses(name, amount, category_id, payer_user_id, day_of_month, recurring, single_month, active, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, p.Name, p.Amount, p.CategoryID, p.PayerID, p.Day, p.Recurring, nullStr(p.SingleMonth), p.Active, nullStr(p.CreatedAt))
 	if err != nil {
 		return 0, err
 	}
