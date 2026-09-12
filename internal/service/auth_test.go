@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"testing"
+
+	"github.com/cedsbe/so-budget/internal/crypto"
 )
 
 func TestInviteActivateLogin(t *testing.T) {
@@ -61,5 +63,50 @@ func TestInviteActivateLogin(t *testing.T) {
 	users, _ := svc.Users(ctx)
 	if len(users) != 1 || users[0].Name != "alice" {
 		t.Fatalf("users: %+v", users)
+	}
+}
+
+// TestChangePasswordKeepsRowKDF pins a regression: ChangePassword must reuse the
+// row's stored KDF params (not the service's currently configured ones) so that
+// the recovery code, wrapped under the same row params, keeps working even if
+// the service's KDF settings change later.
+func TestChangePasswordKeepsRowKDF(t *testing.T) {
+	svc := NewTestService(t)
+	ctx := context.Background()
+
+	tok, err := svc.Invite(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := svc.Activate(ctx, tok, "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := svc.Login(ctx, "bob", "correct horse battery")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the service's configured KDF params being raised after activation.
+	svc.kdf = crypto.KDFParams{Time: 2, Memory: 8 * 1024, Threads: 1}
+
+	if err := svc.ChangePassword(ctx, p, "correct horse battery", "new password here"); err != nil {
+		t.Fatal(err)
+	}
+
+	p2, err := svc.Login(ctx, "bob", "new password here")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p2.Key != p.Key {
+		t.Fatal("key must survive password change even after KDF params changed")
+	}
+
+	// The recovery code was wrapped under the row's original params and must
+	// still work even though svc.kdf has since changed and the password was
+	// re-wrapped by ChangePassword.
+	newCode, err := svc.Recover(ctx, "bob", code, "recovered password")
+	if err != nil || newCode == code {
+		t.Fatalf("recover after password change: %q %v", newCode, err)
 	}
 }

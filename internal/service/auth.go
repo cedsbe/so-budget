@@ -119,11 +119,11 @@ func (s *Service) ChangePassword(ctx context.Context, p Principal, oldPw, newPw 
 	if err != nil {
 		return err
 	}
-	wrapped, err := crypto.Wrap(p.Key, crypto.Derive(newPw, salt, s.kdf))
+	wrapped, err := crypto.Wrap(p.Key, crypto.Derive(newPw, salt, u.KDF))
 	if err != nil {
 		return err
 	}
-	return s.store.SetUserKeys(ctx, u.ID, store.UserKeys{PwSalt: salt, PwWrapped: wrapped, RcSalt: u.RcSalt, RcWrapped: u.RcWrapped, KDF: s.kdf})
+	return s.store.SetUserKeys(ctx, u.ID, store.UserKeys{PwSalt: salt, PwWrapped: wrapped, RcSalt: u.RcSalt, RcWrapped: u.RcWrapped, KDF: u.KDF})
 }
 
 // Recover unwraps the key with the recovery code, sets a new password and returns a new code.
