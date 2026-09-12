@@ -23,6 +23,7 @@ type ledgerData struct {
 	Prev, Next domain.Month
 	Users      []domain.User
 	Categories []domain.Category
+	Planned    []domain.PlannedExpense
 	Today      string
 }
 
@@ -35,7 +36,8 @@ func (s *Server) ledger(w http.ResponseWriter, r *http.Request) {
 	}
 	users, _ := s.svc.Users(r.Context())
 	cats, _ := s.svc.Categories(r.Context(), true)
-	s.render(w, r, "ledger.html", ledgerData{Ledger: l, Prev: m.Prev(), Next: m.Next(), Users: users, Categories: cats, Today: time.Now().Format("2006-01-02")})
+	planned, _ := s.svc.PlannedForMonth(r.Context(), m)
+	s.render(w, r, "ledger.html", ledgerData{Ledger: l, Prev: m.Prev(), Next: m.Next(), Users: users, Categories: cats, Planned: planned, Today: time.Now().Format("2006-01-02")})
 }
 
 func (s *Server) ledgerManual(w http.ResponseWriter, r *http.Request) {

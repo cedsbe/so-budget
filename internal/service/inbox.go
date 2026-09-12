@@ -127,11 +127,6 @@ func (s *Service) Flag(ctx context.Context, p Principal, idHash string, category
 	return id, err
 }
 
-// matchPlanned links e to a planned expense when exactly one fits. Task 15 implements it.
-func (s *Service) matchPlanned(ctx context.Context, tx *store.Store, e *domain.HouseholdEntry) error {
-	return nil
-}
-
 func (s *Service) EditFlagged(ctx context.Context, p Principal, idHash string, categoryID int64, amount domain.Cents, note string) error {
 	b, state, err := s.loadTx(ctx, p, idHash)
 	if err != nil {

@@ -28,7 +28,7 @@
   <td>{{date .Entry.Date}}</td>
   <td>{{.Payer}}</td>
   <td>{{.Category}}</td>
-  <td class="hide-sm muted">{{.Entry.Note}} <span class="muted">· {{.Entry.Source}}</span>{{template "planned-badge" .}}</td>
+  <td class="hide-sm muted">{{.Entry.Note}} <span class="muted">· {{.Entry.Source}}</span>{{template "planned-badge" (dict "Entry" .Entry)}}</td>
   <td class="amount">{{money .Entry.Amount}}</td>
   <td><details><summary class="small">edit</summary>
     <form method="post" action="/ledger/{{.Entry.ID}}/edit" class="row">
@@ -38,7 +38,7 @@
       <input name="note" value="{{.Entry.Note}}" placeholder="note">
       <button class="small">Save</button>
     </form>
-    {{template "planned-picker" .}}
+    {{template "planned-picker" (dict "Entry" .Entry "CSRF" $csrf "Data" $.Data)}}
     <form method="post" action="/ledger/{{.Entry.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="small danger">Delete</button></form>
   </details></td>
 </tr>
@@ -46,5 +46,11 @@
 </tbody>
 </table>
 {{end}}
-{{define "planned-badge"}}{{end}}
-{{define "planned-picker"}}{{end}}
+{{define "planned-badge"}}{{if .Entry.PlannedID}} <span class="muted">· planned</span>{{end}}{{end}}
+{{define "planned-picker"}}
+<form method="post" action="/ledger/{{.Entry.ID}}/match" class="row">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <select name="planned"><option value="0">not a planned expense</option>{{$sel := .Entry.PlannedID}}{{range .Data.Planned}}<option value="{{.ID}}" {{if eq .ID $sel}}selected{{end}}>{{.Name}} ({{money .Amount}})</option>{{end}}</select>
+  <button class="small">Match</button>
+</form>
+{{end}}

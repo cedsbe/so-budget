@@ -54,6 +54,13 @@ var funcs = template.FuncMap{
 		}
 		return out
 	},
+	"dict": func(kv ...any) map[string]any {
+		m := map[string]any{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			m[kv[i].(string)] = kv[i+1]
+		}
+		return m
+	},
 }
 
 func New(svc *service.Service, cfg Config) (*Server, error) {
@@ -93,9 +100,9 @@ func (s *Server) routes() {
 	s.private("POST /logout", s.logout)
 	s.routesInbox() // Task 12
 	s.routesLedger()
-	s.routesImport()   // Task 14
-	s.routesPlanning() // Task 15
-	s.routesReports()  // Task 16
+	s.routesImport() // Task 14
+	s.routesPlanning()
+	s.routesReports() // Task 16
 }
 
 // private registers a handler that requires a session and, for non-GET, a CSRF token.
@@ -103,9 +110,8 @@ func (s *Server) private(pattern string, h http.HandlerFunc) {
 	s.mux.Handle(pattern, s.requireSession(s.checkCSRF(h)))
 }
 
-// Stubs so the file compiles before later tasks add routes.
-func (s *Server) routesPlanning() {}
-func (s *Server) routesReports()  {}
+// Stub so the file compiles before Task 16 adds routes.
+func (s *Server) routesReports() {}
 
 func (s *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
