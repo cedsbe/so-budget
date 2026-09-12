@@ -90,7 +90,11 @@ func (s *Store) ExistingTransactionHashes(ctx context.Context, userID int64, has
 			}
 			out[h] = true
 		}
+		err = rows.Err()
 		rows.Close()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return out, nil
 }
