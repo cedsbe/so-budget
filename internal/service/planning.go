@@ -147,6 +147,9 @@ func (s *Service) Contributions(ctx context.Context, m domain.Month) (map[int64]
 }
 
 func (s *Service) SetContribution(ctx context.Context, userID int64, from domain.Month, amount domain.Cents) error {
+	if amount < 0 {
+		return ErrInvalidAmount
+	}
 	return s.store.SetContribution(ctx, userID, from, amount)
 }
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -64,5 +65,22 @@ func TestPlanningMatchingAndGhosts(t *testing.T) {
 	planned, _ := svc.PlannedForMonth(ctx, sep)
 	if len(planned) != 2 {
 		t.Fatalf("planned for month %d", len(planned))
+	}
+}
+
+func TestSetContributionRejectsNegative(t *testing.T) {
+	svc, _ := NewTestService(t)
+	ctx := context.Background()
+	a := LoginTestUser(t, svc, "alice")
+	sep := domain.Month{Year: 2026, Mon: time.September}
+
+	if err := svc.SetContribution(ctx, a.UserID, sep, -1); !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("negative contribution: got %v, want ErrInvalidAmount", err)
+	}
+	if err := svc.SetContribution(ctx, a.UserID, sep, 0); err != nil {
+		t.Fatalf("zero contribution should be accepted: %v", err)
+	}
+	if c, _ := svc.Contributions(ctx, sep); c[a.UserID] != 0 {
+		t.Fatalf("contribution after zero-set = %d, want 0", c[a.UserID])
 	}
 }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -64,6 +65,10 @@ func (s *Server) contributionSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.SetContribution(r.Context(), formID(r, "user"), m, amount); err != nil {
+		if errors.Is(err, service.ErrInvalidAmount) {
+			s.renderPlanning(w, r, "Contribution cannot be negative.")
+			return
+		}
 		httpError(w, err)
 		return
 	}
