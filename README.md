@@ -24,6 +24,10 @@ then paste the fake setup token printed in the server log under Settings.
       -p 127.0.0.1:8080:8080 so-budget
     docker exec so-budget so-budget invite alice   # prints an invite link
 
+The image runs as uid 10001; a named volume like `so-budget-data` above picks up
+that ownership automatically, but a bind mount (`-v ./data:/data`) must be
+owned by uid 10001 yourself first, e.g. `chown -R 10001:10001 ./data`.
+
 Put Caddy (see `Caddyfile.example`) or any HTTPS reverse proxy in front. Cookies
 are `Secure` unless `SB_DEV=1`. Keep `SB_PEPPER` stable and backed up: it is
 mixed into the transaction id hashes.

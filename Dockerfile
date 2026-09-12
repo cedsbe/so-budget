@@ -7,6 +7,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /so-budget ./cmd/so-bud
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata && adduser -D -u 10001 app
+RUN mkdir -p /data && chown app:app /data
 USER app
 WORKDIR /app
 COPY --from=build /so-budget /usr/local/bin/so-budget
