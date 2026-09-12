@@ -22,7 +22,7 @@ type testApp struct {
 
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
-	svc := service.NewTestService(t)
+	svc, _ := service.NewTestService(t)
 	s, err := New(svc, Config{BaseURL: "http://example", Dev: true, IdleTimeout: 30 * time.Minute, AbsoluteTimeout: 12 * time.Hour})
 	if err != nil {
 		t.Fatal(err)

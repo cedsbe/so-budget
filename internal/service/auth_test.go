@@ -8,7 +8,7 @@ import (
 )
 
 func TestInviteActivateLogin(t *testing.T) {
-	svc := NewTestService(t)
+	svc, _ := NewTestService(t)
 	ctx := context.Background()
 	tok, err := svc.Invite(ctx, "alice")
 	if err != nil {
@@ -71,7 +71,7 @@ func TestInviteActivateLogin(t *testing.T) {
 // the recovery code, wrapped under the same row params, keeps working even if
 // the service's KDF settings change later.
 func TestChangePasswordKeepsRowKDF(t *testing.T) {
-	svc := NewTestService(t)
+	svc, _ := NewTestService(t)
 	ctx := context.Background()
 
 	tok, err := svc.Invite(ctx, "bob")

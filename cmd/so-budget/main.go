@@ -67,8 +67,16 @@ func main() {
 	}
 }
 
-// bankClient returns the real SimpleFIN client, or the local fake when SB_SIMPLEFIN_FAKE=1 (Task 8 fills this in).
-func bankClient(cfg config.Config) simplefin.Client { return nil }
+// bankClient returns the real SimpleFIN client, or the local fake when SB_SIMPLEFIN_FAKE=1.
+func bankClient(cfg config.Config) simplefin.Client {
+	if os.Getenv("SB_SIMPLEFIN_FAKE") == "1" {
+		f := simplefin.NewFake()
+		f.Set(simplefin.SampleSet(time.Now().Unix()))
+		log.Printf("using fake SimpleFIN at %s; setup token: %s", f.URL(), f.SetupToken())
+		return simplefin.NewHTTPClient()
+	}
+	return simplefin.NewHTTPClient()
+}
 
 // backup is implemented in Task 17.
 func backup(st *store.Store, dest string) error { _ = time.Now; return fmt.Errorf("backup not implemented") }
