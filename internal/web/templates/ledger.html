@@ -1,0 +1,50 @@
+{{define "content"}}
+<h1>Household ledger</h1>
+{{$csrf := .CSRF}}{{$cats := .Data.Categories}}{{$users := .Data.Users}}
+<div class="row card">
+  <a class="btn" href="/ledger?month={{month .Data.Prev}}">‹ {{month .Data.Prev}}</a>
+  <strong class="grow" style="text-align:center">{{month .Data.Month}}</strong>
+  <a class="btn" href="/ledger?month={{month .Data.Next}}">{{month .Data.Next}} ›</a>
+</div>
+<div class="grid">
+  <div class="card"><div class="muted">Total</div><div class="stat">{{money .Data.Total}}</div></div>
+  {{range $users}}<div class="card"><div class="muted">{{.Name}}</div><div class="stat">{{money (index $.Data.ByPayer .ID)}}</div></div>{{end}}
+</div>
+<details class="card"><summary>Add a manual entry (cash, other bank)</summary>
+<form method="post" action="/ledger/manual" class="row">
+  <input type="hidden" name="csrf" value="{{$csrf}}">
+  <select name="payer" required>{{range $users}}<option value="{{.ID}}" {{if eq .ID $.User.ID}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+  <input type="date" name="date" value="{{.Data.Today}}" required>
+  <input name="amount" placeholder="amount spent" inputmode="decimal" required>
+  <select name="category" required><option value="">category…</option>{{range $cats}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select>
+  <input name="note" placeholder="note" class="grow">
+  <button class="primary">Add</button>
+</form></details>
+<table>
+<thead><tr><th>Date</th><th>Who</th><th>Category</th><th class="hide-sm">Note</th><th class="amount">Amount</th><th></th></tr></thead>
+<tbody>
+{{range .Data.Lines}}
+<tr id="entry-{{.Entry.ID}}">
+  <td>{{date .Entry.Date}}</td>
+  <td>{{.Payer}}</td>
+  <td>{{.Category}}</td>
+  <td class="hide-sm muted">{{.Entry.Note}} <span class="muted">· {{.Entry.Source}}</span>{{template "planned-badge" .}}</td>
+  <td class="amount">{{money .Entry.Amount}}</td>
+  <td><details><summary class="small">edit</summary>
+    <form method="post" action="/ledger/{{.Entry.ID}}/edit" class="row">
+      <input type="hidden" name="csrf" value="{{$csrf}}">
+      <select name="category">{{$sel := .Entry.CategoryID}}{{range $cats}}<option value="{{.ID}}" {{if eq .ID $sel}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+      <input name="amount" value="{{money .Entry.Amount}}" inputmode="decimal">
+      <input name="note" value="{{.Entry.Note}}" placeholder="note">
+      <button class="small">Save</button>
+    </form>
+    {{template "planned-picker" .}}
+    <form method="post" action="/ledger/{{.Entry.ID}}/delete" class="inline"><input type="hidden" name="csrf" value="{{$csrf}}"><button class="small danger">Delete</button></form>
+  </details></td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+{{define "planned-badge"}}{{end}}
+{{define "planned-picker"}}{{end}}

@@ -91,8 +91,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /recover", s.recoverSubmit)
 
 	s.private("POST /logout", s.logout)
-	s.routesInbox()    // Task 12
-	s.routesLedger()   // Task 13
+	s.routesInbox() // Task 12
+	s.routesLedger()
 	s.routesImport()   // Task 14
 	s.routesPlanning() // Task 15
 	s.routesReports()  // Task 16
@@ -104,7 +104,6 @@ func (s *Server) private(pattern string, h http.HandlerFunc) {
 }
 
 // Stubs so the file compiles before later tasks add routes.
-func (s *Server) routesLedger()   {}
 func (s *Server) routesImport()   {}
 func (s *Server) routesPlanning() {}
 func (s *Server) routesReports()  {}

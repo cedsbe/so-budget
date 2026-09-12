@@ -58,4 +58,19 @@
   <button>Change</button>
 </form>
 {{end}}
-{{define "settings-extra"}}{{end}}
+{{define "settings-extra"}}
+<h2>Categories</h2>
+<div class="card">
+  {{range .Data.Categories}}
+  <form method="post" action="/settings/categories/{{.ID}}" class="row">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
+    <input name="name" value="{{.Name}}" class="grow">
+    <label><input type="checkbox" name="active" value="1" {{if .Active}}checked{{end}}> active</label>
+    <button class="small">Save</button>
+  </form>
+  {{end}}
+  <form method="post" action="/settings/categories" class="row"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input name="name" placeholder="new category" required class="grow"><button class="small">Add</button></form>
+</div>
+{{template "settings-import" .}}
+{{end}}
+{{define "settings-import"}}{{end}}
