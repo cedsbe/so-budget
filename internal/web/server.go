@@ -104,7 +104,6 @@ func (s *Server) private(pattern string, h http.HandlerFunc) {
 }
 
 // Stubs so the file compiles before later tasks add routes.
-func (s *Server) routesImport()   {}
 func (s *Server) routesPlanning() {}
 func (s *Server) routesReports()  {}
 

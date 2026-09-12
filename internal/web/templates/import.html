@@ -1,0 +1,31 @@
+{{define "content"}}
+<h1>Import sheet history</h1>
+{{if .Data.Error}}<p class="error">{{.Data.Error}}</p>{{end}}
+{{if not .Data.Preview}}
+<form method="post" action="/settings/import/preview" enctype="multipart/form-data" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <p>Export your Google Sheet as CSV with a header row containing <code>Payer, Date, Payee, Amount, Description, Type</code>.</p>
+  <p><input type="file" name="file" accept=".csv,text/csv" required></p>
+  <button class="primary">Preview</button>
+</form>
+{{else}}
+{{$users := .Data.Users}}{{$cats := .Data.Categories}}
+<form method="post" action="/settings/import/commit" class="card">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <h2>Who is who</h2>
+  {{range .Data.Preview.Payers}}<p class="row"><span class="grow">{{.}}</span><select name="payer.{{.}}" required><option value="">user…</option>{{range $users}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></p>{{end}}
+  <h2>Types to categories</h2>
+  {{range .Data.Preview.Types}}<p class="row"><span class="grow">{{.}}</span><select name="type.{{.}}"><option value="0">create "{{.}}"</option>{{range $cats}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></p>{{end}}
+  <p><label><input type="checkbox" name="negate" value="1"> Amounts in the file are negative for expenses</label></p>
+  <p>{{len .Data.Preview.Rows}} rows, {{.Data.Preview.Errors}} with errors (skipped).</p>
+  <button class="primary">Import</button>
+</form>
+<table>
+<thead><tr><th>Line</th><th>Payer</th><th>Date</th><th>Payee</th><th class="amount">Amount</th><th>Type</th><th>Problem</th></tr></thead>
+<tbody>{{range .Data.Preview.Rows}}<tr>
+  <td>{{.Line}}</td><td>{{.Payer}}</td><td>{{if not .Err}}{{date .Date}}{{end}}</td><td>{{.Payee}}{{if .Description}} <span class="muted">{{.Description}}</span>{{end}}</td>
+  <td class="amount">{{money .Amount}}</td><td>{{.Type}}</td><td class="error">{{.Err}}</td>
+</tr>{{end}}</tbody>
+</table>
+{{end}}
+{{end}}
