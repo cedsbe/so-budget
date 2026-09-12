@@ -1,0 +1,55 @@
+{{define "content"}}
+<h1>Reports</h1>
+<div class="row card">
+  <a class="btn" href="/reports?month={{month .Data.Prev}}">‹ {{month .Data.Prev}}</a>
+  <strong class="grow" style="text-align:center">{{month .Data.Month}}{{if .Data.Closed}} <span class="muted">(closed)</span>{{end}}</strong>
+  <a class="btn" href="/reports?month={{month .Data.Next}}">{{month .Data.Next}} ›</a>
+  <a class="btn" href="/reports/export.csv?month={{month .Data.Month}}">Export CSV</a>
+</div>
+
+<div class="grid">
+  <div class="card"><div class="muted">Contributions</div><div class="stat">{{money .Data.Contributions}}</div></div>
+  <div class="card"><div class="muted">Committed</div><div class="stat">{{money .Data.Committed}}</div><div class="muted">{{money .Data.Spent}} spent · {{money .Data.PlannedUnmatched}} still planned</div></div>
+  <div class="card"><div class="muted">Margin</div><div class="stat {{if lt .Data.Margin 0}}neg{{else}}pos{{end}}">{{money .Data.Margin}}</div></div>
+</div>
+
+<h2>Balance per person</h2>
+<table>
+<thead><tr><th>Who</th><th class="amount">Contribution</th><th class="amount">Spent</th><th class="amount hide-sm">Still planned</th><th class="amount">Committed</th><th class="amount">Balance</th></tr></thead>
+<tbody>{{range .Data.People}}<tr>
+  <td>{{.User.Name}}</td><td class="amount">{{money .Contribution}}</td><td class="amount">{{money .Spent}}</td><td class="amount hide-sm">{{money .PlannedUnmatched}}</td><td class="amount">{{money .Committed}}</td>
+  <td class="amount {{if lt .Balance 0}}neg{{else}}pos{{end}}">{{money .Balance}}</td>
+</tr>{{end}}</tbody>
+</table>
+
+<h2>Spend by category</h2>
+{{$m := .Data.Month}}{{$max := .Data.MaxCat}}
+<table>
+<thead><tr><th>Category</th><th class="amount">This month</th><th class="amount hide-sm">Previous</th><th style="width:40%"></th></tr></thead>
+<tbody>{{range .Data.Categories}}<tr>
+  <td><a href="/ledger?month={{month $m}}&category={{.CategoryID}}">{{.Name}}</a></td>
+  <td class="amount">{{money .This}}</td><td class="amount hide-sm">{{money .Previous}}</td>
+  <td><div class="bar" style="width:{{pct .This $max}}%"></div><div class="bar prev" style="width:{{pct .Previous $max}}%"></div></td>
+</tr>{{end}}</tbody>
+</table>
+
+<h2>Planned vs actual</h2>
+<table>
+<thead><tr><th>Planned</th><th class="amount">Expected</th><th class="amount">Actual</th></tr></thead>
+<tbody>{{range .Data.Planned}}<tr>
+  <td>{{.Planned.Name}}</td><td class="amount">{{money .Planned.Amount}}</td>
+  <td class="amount">{{if .Occurred}}{{money .Matched}}{{else if $.Data.Closed}}<span class="muted">did not occur</span>{{else}}<span class="muted">not yet</span>{{end}}</td>
+</tr>{{end}}</tbody>
+</table>
+
+<h2>Six-month trend</h2>
+{{$mt := .Data.MaxTrend}}{{$users := .Data.Users}}
+<table>
+<thead><tr><th>Month</th><th class="amount">Total</th>{{range $users}}<th class="amount hide-sm">{{.Name}}</th>{{end}}<th style="width:40%"></th></tr></thead>
+<tbody>{{range .Data.Trend}}<tr>
+  <td><a href="/reports?month={{month .Month}}">{{month .Month}}</a></td><td class="amount">{{money .Total}}</td>
+  {{$t := .}}{{range $users}}<td class="amount hide-sm">{{money (index $t.ByUser .ID)}}</td>{{end}}
+  <td><div class="bar" style="width:{{pct .Total $mt}}%"></div></td>
+</tr>{{end}}</tbody>
+</table>
+{{end}}

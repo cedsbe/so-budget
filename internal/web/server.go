@@ -61,6 +61,12 @@ var funcs = template.FuncMap{
 		}
 		return m
 	},
+	"pct": func(v, max domain.Cents) int {
+		if max <= 0 {
+			return 0
+		}
+		return int(v * 100 / max)
+	},
 }
 
 func New(svc *service.Service, cfg Config) (*Server, error) {
@@ -109,9 +115,6 @@ func (s *Server) routes() {
 func (s *Server) private(pattern string, h http.HandlerFunc) {
 	s.mux.Handle(pattern, s.requireSession(s.checkCSRF(h)))
 }
-
-// Stub so the file compiles before Task 16 adds routes.
-func (s *Server) routesReports() {}
 
 func (s *Server) requireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

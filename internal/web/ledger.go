@@ -34,6 +34,20 @@ func (s *Server) ledger(w http.ResponseWriter, r *http.Request) {
 		httpError(w, err)
 		return
 	}
+	if cat, err := strconv.ParseInt(r.URL.Query().Get("category"), 10, 64); err == nil && cat != 0 {
+		var kept []service.LedgerLine
+		l.Total = 0
+		l.ByPayer = map[int64]domain.Cents{}
+		for _, line := range l.Lines {
+			if line.Entry.CategoryID != cat {
+				continue
+			}
+			kept = append(kept, line)
+			l.Total += line.Entry.Amount
+			l.ByPayer[line.Entry.PayerID] += line.Entry.Amount
+		}
+		l.Lines = kept
+	}
 	users, _ := s.svc.Users(r.Context())
 	cats, _ := s.svc.Categories(r.Context(), true)
 	planned, _ := s.svc.PlannedForMonth(r.Context(), m)
