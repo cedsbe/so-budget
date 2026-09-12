@@ -1,0 +1,10 @@
+{{define "content"}}
+<h1>Log in</h1>
+{{if .Data.Error}}<p class="error">{{.Data.Error}}</p>{{end}}
+<form method="post" action="/login" class="card">
+  <p><label>Name<br><input name="name" autocomplete="username" required autofocus></label></p>
+  <p><label>Password<br><input type="password" name="password" autocomplete="current-password" required></label></p>
+  <button class="primary">Log in</button>
+  <a href="/recover" class="muted">Forgot password?</a>
+</form>
+{{end}}

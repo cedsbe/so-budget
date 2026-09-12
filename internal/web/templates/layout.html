@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/htmx.min.js"></script>
+</head>
+<body {{if .CSRF}}hx-headers='{"X-CSRF-Token": "{{.CSRF}}"}'{{end}}>
+{{if .User}}
+<nav>
+  <a href="/" {{if eq .Path "/"}}class="active"{{end}}>Inbox</a>
+  <a href="/history" {{if eq .Path "/history"}}class="active"{{end}}>History</a>
+  <a href="/ledger" {{if eq .Path "/ledger"}}class="active"{{end}}>Ledger</a>
+  <a href="/planning" {{if eq .Path "/planning"}}class="active"{{end}}>Planning</a>
+  <a href="/reports" {{if eq .Path "/reports"}}class="active"{{end}}>Reports</a>
+  <a href="/settings" {{if eq .Path "/settings"}}class="active"{{end}}>Settings</a>
+  <span class="spacer"></span>
+  <span class="muted">{{.User.Name}}</span>
+  <form method="post" action="/logout" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="small">Log out</button></form>
+</nav>
+{{end}}
+<main>
+{{if .Flash}}<div class="flash">{{.Flash}}</div>{{end}}
+{{template "content" .}}
+</main>
+</body>
+</html>

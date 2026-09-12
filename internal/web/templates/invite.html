@@ -1,0 +1,18 @@
+{{define "content"}}
+<h1>Welcome, {{.Data.Name}}</h1>
+{{if .Data.RecoveryCode}}
+<div class="card">
+  <p>Your account is ready. This is your <strong>recovery code</strong>. It is the only way to get your private data back if you forget your password. Store it in a password manager now; it will not be shown again.</p>
+  <code class="recovery">{{.Data.RecoveryCode}}</code>
+  <p><a href="/login" class="btn">Go to login</a></p>
+</div>
+{{else}}
+{{if .Data.Error}}<p class="error">{{.Data.Error}}</p>{{end}}
+<form method="post" action="/invite/{{.Data.Token}}" class="card">
+  <p>Choose a password (at least 10 characters). Your private transactions are encrypted with a key that only this password unlocks.</p>
+  <p><label>Password<br><input type="password" name="password" autocomplete="new-password" required></label></p>
+  <p><label>Confirm<br><input type="password" name="confirm" autocomplete="new-password" required></label></p>
+  <button class="primary">Create account</button>
+</form>
+{{end}}
+{{end}}

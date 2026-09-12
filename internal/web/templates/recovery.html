@@ -1,0 +1,18 @@
+{{define "content"}}
+<h1>Recover access</h1>
+{{if .Data.RecoveryCode}}
+<div class="card">
+  <p>Password reset. Here is your <strong>new</strong> recovery code; the old one no longer works.</p>
+  <code class="recovery">{{.Data.RecoveryCode}}</code>
+  <p><a href="/login" class="btn">Go to login</a></p>
+</div>
+{{else}}
+{{if .Data.Error}}<p class="error">{{.Data.Error}}</p>{{end}}
+<form method="post" action="/recover" class="card">
+  <p><label>Name<br><input name="name" required></label></p>
+  <p><label>Recovery code<br><input name="code" required></label></p>
+  <p><label>New password<br><input type="password" name="password" required></label></p>
+  <button class="primary">Reset password</button>
+</form>
+{{end}}
+{{end}}
