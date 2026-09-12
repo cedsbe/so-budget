@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/cedsbe/so-budget/internal/service"
+	"github.com/cedsbe/so-budget/internal/simplefin"
 )
 
 type testApp struct {
 	svc    *service.Service
+	fake   *simplefin.Fake
 	server *Server
 	srv    *httptest.Server
 	client *http.Client
@@ -22,7 +24,7 @@ type testApp struct {
 
 func newTestApp(t *testing.T) *testApp {
 	t.Helper()
-	svc, _ := service.NewTestService(t)
+	svc, fake := service.NewTestService(t)
 	s, err := New(svc, Config{BaseURL: "http://example", Dev: true, IdleTimeout: 30 * time.Minute, AbsoluteTimeout: 12 * time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +33,7 @@ func newTestApp(t *testing.T) *testApp {
 	t.Cleanup(srv.Close)
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &testApp{svc: svc, server: s, srv: srv, client: client}
+	return &testApp{svc: svc, fake: fake, server: s, srv: srv, client: client}
 }
 
 func testServer(t *testing.T, a *testApp) *Server { return a.server }

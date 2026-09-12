@@ -29,8 +29,7 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// afterLogin is a hook replaced in Task 12.
-func (s *Server) afterLogin(r *http.Request, sess *Session) {}
+func (s *Server) afterLogin(r *http.Request, sess *Session) { s.maybeSync(r, sess) }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if sess := s.session(r); sess != nil {

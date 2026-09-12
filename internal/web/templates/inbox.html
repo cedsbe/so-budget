@@ -1,0 +1,45 @@
+{{define "content"}}
+<h1>Inbox</h1>
+{{range .Data.SyncErrors}}<div class="banner">{{.}} — <a href="https://beta-bridge.simplefin.org/" target="_blank" rel="noopener">open SimpleFIN</a></div>{{end}}
+{{if not .Data.Linked}}
+<div class="card">No bank linked yet. Go to <a href="/settings">Settings</a> to paste your SimpleFIN setup token.</div>
+{{else}}
+<div class="row card">
+  <form method="post" action="/inbox/accept-all" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Accept all suggestions</button></form>
+  <form method="post" action="/inbox/reapply" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Re-apply rules</button></form>
+  <form method="post" action="/sync" class="inline"><input type="hidden" name="csrf" value="{{.CSRF}}"><button>Sync now</button></form>
+  <span class="muted grow">{{if .Data.HasLastSync}}Last sync {{.Data.LastSync.Format "2006-01-02 15:04"}}{{end}}</span>
+</div>
+{{if not .Data.Items}}<p class="muted">Nothing to review.</p>{{end}}
+<table>
+<thead><tr><th>Date</th><th class="hide-sm">Account</th><th>Payee</th><th class="amount">Amount</th><th></th></tr></thead>
+<tbody>
+{{$cats := .Data.Categories}}{{$csrf := .CSRF}}
+{{range .Data.Items}}
+<tr id="tx-{{.IDHash}}">
+  <td>{{date .Tx.Posted}}</td>
+  <td class="hide-sm muted">{{.AccountName}}</td>
+  <td>{{.Tx.Payee}}{{if .SuggestedCategory}}<br><span class="muted">suggested: {{.SuggestedCategory}}{{if .Tx.SuggestHousehold}} · household{{end}}</span>{{end}}</td>
+  <td class="amount {{if lt .Tx.Amount 0}}neg{{else}}pos{{end}}">{{money .Tx.Amount}}</td>
+  <td>
+    <form hx-post="/tx/{{.IDHash}}/flag" hx-target="#tx-{{.IDHash}}" hx-swap="outerHTML" class="row">
+      <select name="category" required>
+        <option value="">category…</option>
+        {{$sel := .Tx.SuggestedCategoryID}}{{range $cats}}<option value="{{.ID}}" {{if eq .ID $sel}}selected{{end}}>{{.Name}}</option>{{end}}
+      </select>
+      <button class="primary small">Flag</button>
+      <details><summary class="small">more</summary>
+        <label>Amount <input name="amount" placeholder="{{money .Tx.Amount.Abs}}" inputmode="decimal"></label>
+        <label>Note <input name="note"></label>
+        <button class="small" formaction="/tx/{{.IDHash}}/rule/household" hx-post="/tx/{{.IDHash}}/rule/household" hx-target="body">Always suggest this</button>
+      </details>
+    </form>
+    <button class="small" hx-post="/tx/{{.IDHash}}/dismiss" hx-target="#tx-{{.IDHash}}" hx-swap="outerHTML">Dismiss</button>
+    <button class="small" hx-post="/tx/{{.IDHash}}/rule/private" hx-target="#tx-{{.IDHash}}" hx-swap="outerHTML" hx-confirm="Always dismiss this payee?">Always dismiss</button>
+  </td>
+</tr>
+{{end}}
+</tbody>
+</table>
+{{end}}
+{{end}}

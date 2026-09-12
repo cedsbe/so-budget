@@ -1,0 +1,61 @@
+{{define "content"}}
+<h1>Settings</h1>
+{{if .Data.Error}}<p class="error">{{.Data.Error}}</p>{{end}}
+{{$csrf := .CSRF}}
+
+<h2>Bank connection</h2>
+<div class="card">
+{{if .Data.Linked}}
+  <p>Linked. Accounts:</p>
+  <table>{{range .Data.Accounts}}<tr>
+    <td><form method="post" action="/settings/account" class="row"><input type="hidden" name="csrf" value="{{$csrf}}"><input type="hidden" name="account_id" value="{{.ID}}"><input name="name" value="{{.Name}}"><button class="small">Rename</button></form></td>
+    <td class="muted">{{.Institution}}</td><td class="amount">{{money .Balance}} {{.Currency}}</td>
+  </tr>{{end}}</table>
+  <form method="post" action="/settings/start" class="row">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <label>Only sync transactions from <input type="date" name="date" value="{{.Data.StartDate}}"></label>
+    <button class="small">Save</button> <span class="muted">Leave empty to keep everything. Useful after importing older history.</span>
+  </form>
+  <p class="muted">To re-link, paste a new setup token below.</p>
+{{end}}
+  <form method="post" action="/settings/link" class="row">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <label class="grow">SimpleFIN setup token <input name="token" class="grow" required style="width:100%"></label>
+    <button class="primary">Link</button>
+  </form>
+  <p class="muted">Get a token at beta-bridge.simplefin.org → Apps → New connection. Your token and transactions are encrypted with your key; syncs only run while you are logged in.</p>
+</div>
+
+<h2>Private dismiss rules</h2>
+<div class="card">
+  <p class="muted">Only you can see these. Matching payees are dismissed automatically.</p>
+  {{range .Data.PrivateRules}}<form method="post" action="/settings/rules/private/{{.ID}}/delete" class="row"><input type="hidden" name="csrf" value="{{$csrf}}"><span class="grow">{{.Pattern}}</span><button class="small danger">Delete</button></form>{{end}}
+  <form method="post" action="/settings/rules/private" class="row"><input type="hidden" name="csrf" value="{{$csrf}}"><input name="pattern" placeholder="payee contains…" required class="grow"><button class="small">Add</button></form>
+</div>
+
+<h2>Household rules</h2>
+<div class="card">
+  <p class="muted">Shared with your partner. Matching payees get a suggested category.</p>
+  {{$names := .Data.CatNames}}
+  {{range .Data.HouseholdRules}}<form method="post" action="/settings/rules/household/{{.ID}}/delete" class="row"><input type="hidden" name="csrf" value="{{$csrf}}"><span class="grow">{{.Pattern}} → {{index $names .CategoryID}}{{if .SuggestHousehold}} · household{{end}}</span><button class="small danger">Delete</button></form>{{end}}
+  <form method="post" action="/settings/rules/household" class="row">
+    <input type="hidden" name="csrf" value="{{$csrf}}">
+    <input name="pattern" placeholder="payee contains…" required class="grow">
+    <select name="category" required><option value="">category…</option>{{range .Data.Categories}}{{if .Active}}<option value="{{.ID}}">{{.Name}}</option>{{end}}{{end}}</select>
+    <label><input type="checkbox" name="household" value="1" checked> suggest household</label>
+    <button class="small">Add</button>
+  </form>
+</div>
+
+{{template "settings-extra" .}}
+
+<h2>Password</h2>
+<form method="post" action="/settings/password" class="card row">
+  <input type="hidden" name="csrf" value="{{$csrf}}">
+  <input type="password" name="old" placeholder="current" autocomplete="current-password" required>
+  <input type="password" name="new" placeholder="new" autocomplete="new-password" required>
+  <input type="password" name="confirm" placeholder="confirm" autocomplete="new-password" required>
+  <button>Change</button>
+</form>
+{{end}}
+{{define "settings-extra"}}{{end}}
