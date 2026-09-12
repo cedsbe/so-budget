@@ -243,9 +243,10 @@ func monthParam(r *http.Request) domain.Month {
 	return domain.MonthOf(time.Now())
 }
 
-// history serves GET /history?month= for plain navigation (no query text lands here).
+// history serves GET /history?month= for plain navigation. Any ?q= is ignored on
+// purpose: a payee in a URL would reach proxy logs and browser history.
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
-	s.renderHistory(w, r, monthParam(r), r.URL.Query().Get("q"))
+	s.renderHistory(w, r, monthParam(r), "")
 }
 
 // historySearch serves POST /history so a payee search term never lands in a URL

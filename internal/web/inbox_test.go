@@ -126,6 +126,12 @@ func TestInboxLinkFlagAndThrottle(t *testing.T) {
 	if !strings.Contains(body, "SOBEYS") || strings.Contains(body, "TIM HORTONS") {
 		t.Fatalf("history search: %s", body)
 	}
+	// A hand-typed GET ?q= must be ignored: it would put a payee in proxy logs.
+	resp, _ = a.client.Get(a.srv.URL + "/history?q=SOBEYS")
+	body = readBody(resp)
+	if !strings.Contains(body, "SOBEYS") || !strings.Contains(body, "TIM HORTONS") {
+		t.Fatalf("GET /history must ignore q: %s", body)
+	}
 
 	// Rule from transaction: always dismiss TIM HORTONS.
 	inbox, _ = a.svc.Inbox(context.Background(), principalOf(t, a))
